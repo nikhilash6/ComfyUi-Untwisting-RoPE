@@ -17,12 +17,6 @@ Navigate to the **ComfyUI\custom_nodes** folder, [open cmd](https://www.youtube.
 ```bash
 git clone https://github.com/BigStationW/ComfyUi-Untwisting-RoPE
 ```
-
-Navigate to the **ComfyUI\custom_nodes\ComfyUi-Untwisting-RoPE** folder, open cmd and run:
-
-```bash
-..\..\..\python_embeded\python.exe -s -m pip install -r "requirements.txt"
-```
 Restart ComfyUI after installation.
 
 ## Usage
