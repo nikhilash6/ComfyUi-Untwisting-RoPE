@@ -1148,6 +1148,25 @@ def _find_sigma_schedule(obj: Any, depth: int = 0) -> Optional[List[float]]:
 # Utility helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _parse_active_blocks(blocks_str):
+    active = set()
+    if not isinstance(blocks_str, str) or not blocks_str.strip():
+        return active
+    for part in blocks_str.split(','):
+        part = part.strip()
+        if '-' in part:
+            try:
+                start, end = part.split('-')
+                active.update(range(int(start), int(end) + 1))
+            except ValueError:
+                pass
+        else:
+            try:
+                active.add(int(part))
+            except ValueError:
+                pass
+    return active
+
 def _select_model_adapter(model_patcher: Any, model_info: Optional[Dict[str, Any]] = None) -> Any:
     adapter = model_adapters.identify(model_patcher, model_info or {})
     if isinstance(model_info, dict):
@@ -1962,7 +1981,9 @@ def _patch_joint_attention_modules(dm, stats):
                                 transformer_options=transformer_options)
 
                 block_idx = int(transformer_options.get('block_index', -1))
-                if not (int(cfg['start_block']) <= block_idx <= int(cfg['end_block'])):
+                active_blocks = cfg.get('active_blocks', set())
+                # If active_blocks is not empty, restrict patching to those indices
+                if active_blocks and block_idx not in active_blocks:
                     return orig(x, x_mask, freqs_cis,
                                 transformer_options=transformer_options)
 
@@ -2638,9 +2659,8 @@ class UntwistingRoPE:
                 'high_scale_end': ('FLOAT', {'default': 0.00, 'min': -4.0, 'max': 8.0, 'step': 0.01}),
                 'low_scale_start': ('FLOAT', {'default': 1.0, 'min': -4.0, 'max': 8.0, 'step': 0.01}),
                 'low_scale_end': ('FLOAT', {'default': 3.0, 'min': -4.0, 'max': 8.0, 'step': 0.01}),
-                'start_block': ('INT', {'default': 0, 'min': 0, 'max': 999, 'step': 1}),
-                'end_block': ('INT', {'default': 999, 'min': 0, 'max': 999, 'step': 1}),
                 'adain_strength': ('FLOAT', {'default': 0.5, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
+                'blocks': ('STRING', {'default': '0-999', 'tooltip': 'Specify block ranges to patch, e.g -> 0-8, 28-37'}),
                 'verbose': ('BOOLEAN', {'default': False}),
             },
             'optional': {
@@ -2656,8 +2676,7 @@ class UntwistingRoPE:
         high_scale_end: float,
         low_scale_start: float,
         low_scale_end: float,
-        start_block: int,
-        end_block: int,
+        blocks: str,
         adain_strength: float,
         verbose: bool = False,
         rf_inversion: Optional[Dict[str, Any]] = None,
@@ -2692,7 +2711,7 @@ class UntwistingRoPE:
         _vprint(stats, f'{_PREFIX} high_scale: {high_scale_start:.3f} → {high_scale_end:.3f}')
         _vprint(stats, f'{_PREFIX} low_scale:  {low_scale_start:.3f} → {low_scale_end:.3f}')
         _vprint(stats,
-            f'{_PREFIX} blocks [{start_block}, {end_block}]  '
+            f'{_PREFIX} blocks: {blocks if blocks.strip() else "all"}  '
             f'adain={adain_strength:.2f}'
         )
         _vprint(stats, f'{_PREFIX} RF latent connected: {rf_active}  source={rf_source}')
@@ -2731,6 +2750,8 @@ class UntwistingRoPE:
 
         old_wrapper = model_clone.model_options.get('model_function_wrapper', None)
 
+        parsed_blocks = _parse_active_blocks(blocks)
+
         def model_function_wrapper(apply_model: Callable, args: Dict[str, Any]) -> torch.Tensor:
             stats.wrapper_calls += 1
             call_n = stats.wrapper_calls
@@ -2752,8 +2773,7 @@ class UntwistingRoPE:
                 'high_scale_end': float(high_scale_end),
                 'low_scale_start': float(low_scale_start),
                 'low_scale_end': float(low_scale_end),
-                'start_block': int(start_block),
-                'end_block': int(end_block),
+                'active_blocks': parsed_blocks,
                 'apply_adain': True,
                 'adain_strength': float(adain_strength),
                 'cross_batch_target_batch': target_b if rf_active else 0,
