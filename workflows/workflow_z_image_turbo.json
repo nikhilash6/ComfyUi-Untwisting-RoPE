@@ -1,7 +1,7 @@
 {
   "id": "44259803-f9d6-4eb1-a94a-75b8213649d0",
   "revision": 0,
-  "last_node_id": 623,
+  "last_node_id": 624,
   "last_link_id": 1552,
   "nodes": [
     {
@@ -830,6 +830,29 @@
       ]
     },
     {
+      "id": 611,
+      "type": "Note",
+      "pos": [
+        1135.7803046387965,
+        994.345855096394
+      ],
+      "size": [
+        289.0740052806825,
+        112.57343506692268
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "The only relevant values to change are :\n\n- high_scale_start: (between 1.0 and 1.15) \n- low_scale_end: (between 3.0 and 4.0)"
+      ],
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
       "id": 623,
       "type": "UntwistingRoPE",
       "pos": [
@@ -838,7 +861,7 @@
       ],
       "size": [
         270,
-        246
+        270
       ],
       "flags": {},
       "order": 17,
@@ -879,31 +902,9 @@
         3,
         0.5,
         "0-999",
+        true,
         false
       ]
-    },
-    {
-      "id": 611,
-      "type": "Note",
-      "pos": [
-        1135.7803046387965,
-        994.345855096394
-      ],
-      "size": [
-        289.0740052806825,
-        112.57343506692268
-      ],
-      "flags": {},
-      "order": 10,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "properties": {},
-      "widgets_values": [
-        "The only relevant values to change are :\n\n- high_scale_start: (between 1.0 and 1.15) \n- low_scale_end: (between 3.0 and 4.0)"
-      ],
-      "color": "#c09430",
-      "bgcolor": "rgba(24,24,27,.9)"
     }
   ],
   "links": [
@@ -1104,10 +1105,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.5054470284992979,
+      "scale": 0.5559917313492277,
       "offset": [
-        -283.02817232175545,
-        -612.2021925980097
+        -217.6102602719588,
+        -591.8939349849151
       ]
     },
     "frontendVersion": "1.43.18",
