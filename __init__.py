@@ -1777,16 +1777,41 @@ class RFInversion:
                 'rf_mode': (['linear', 'rf_gamma', 'rf_gamma_rk2', 'fireflow'], {
                     'default': 'rf_gamma',
                     'tooltip': (
-                        'linear: no model velocity; pmi_alpha has no effect.\n'
-                        'rf_gamma/rf_gamma_rk2: use gamma and optional gamma_curve.\n'
-                        'fireflow: FireFlow recurrence with optional PMI/norm.'
+                        'Selects the ODE solver used to build the noisy reference trajectory: linear (no model calls -> random noise), rf_gamma (Euler), rf_gamma_rk2 (Runge-Kutta midpoint), or fireflow (FireFlow recurrence).'
                     ),
                 }),
-                'gamma': ('FLOAT', {'default': 0.1, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
-                'gamma_curve': ('FLOAT', {'default': 2.0, 'min': 0.0, 'max': 8.0, 'step': 0.05}),
-                'norm_strength': ('FLOAT', {'default': 1.0, 'min': 0.0, 'max': 1.0, 'step': 0.05}),
-                'pmi_alpha': ('FLOAT', {'default': 0.5, 'min': 0.0, 'max': 1.0, 'step': 0.05}),
-                'verbose': ('BOOLEAN', {'default': False}),
+                'gamma': ('FLOAT', {
+                    'default': 0.1,
+                    'min': 0.0,
+                    'max': 1.0,
+                    'step': 0.01,
+                    'tooltip': 'Blends weight between model velocity and prior velocity (0 = pure prior / straight path, 1 = pure model); only used by rf_gamma and rf_gamma_rk2.'
+                }),
+                'gamma_curve': ('FLOAT', {
+                    'default': 2.0,
+                    'min': 0.0,
+                    'max': 8.0,
+                    'step': 0.05,
+                    'tooltip': 'Applies a bell-shaped schedule to gamma across the sigma range, concentrating model influence toward mid-noise levels; 0 disables the curve.'
+                }),
+                'norm_strength': ('FLOAT', {
+                    'default': 1.0,
+                    'min': 0.0,
+                    'max': 1.0,
+                    'step': 0.05,
+                    'tooltip': "After each RF step, blends the latent's mean/std toward the linear target to prevent feature drift; 0 = off, 1 = full correction."
+                }),
+                'pmi_alpha': ('FLOAT', {
+                    'default': 0.5,
+                    'min': 0.0,
+                    'max': 1.0,
+                    'step': 0.05,
+                    'tooltip': 'PMI (Proximal-Mean Inversion) smooths out the velocity estimation by using a running mean across steps, 0 disables PMI.'
+                }),
+                'verbose': ('BOOLEAN', {
+                    'default': False,
+                    'tooltip': 'Enable verbose logging.'
+                }),
             },
             'optional': {
                 'ref_conditioning': ('CONDITIONING',),
@@ -2173,14 +2198,56 @@ class UntwistingRoPE:
         return {
             'required': {
                 'model': ('MODEL',),
-                'beta': ('FLOAT', {'default': 50.0, 'min': 0.01, 'max': 100.0, 'step': 0.01}),
-                'high_scale_start': ('FLOAT', {'default': 1.0, 'min': -4.0, 'max': 8.0, 'step': 0.01}),
-                'high_scale_end': ('FLOAT', {'default': 0.00, 'min': -4.0, 'max': 8.0, 'step': 0.01}),
-                'low_scale_start': ('FLOAT', {'default': 1.0, 'min': -4.0, 'max': 8.0, 'step': 0.01}),
-                'low_scale_end': ('FLOAT', {'default': 3.0, 'min': -4.0, 'max': 8.0, 'step': 0.01}),
-                'adain_strength': ('FLOAT', {'default': 0.5, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
-                'blocks': ('STRING', {'default': '0-999', 'tooltip': 'Specify block ranges to patch, e.g -> 0-8, 28-37'}),
-                'verbose': ('BOOLEAN', {'default': False}),
+                'beta': ('FLOAT', {
+                    'default': 50.0,
+                    'min': 0.01,
+                    'max': 100.0,
+                    'step': 0.01,
+                    'tooltip': 'Controls the steepness of the frequency scale curve. Higher values prevent the model from copying the reference image too closely.'
+                }),
+                'high_scale_start': ('FLOAT', {
+                    'default': 1.0,
+                    'min': -4.0,
+                    'max': 8.0,
+                    'step': 0.01,
+                    'tooltip': 'Scale applied to high-frequency components. The higher the value, the more the final image will resemble the structure of the reference image.'
+                }),
+                'high_scale_end': ('FLOAT', {
+                    'default': 0.00,
+                    'min': -4.0,
+                    'max': 8.0,
+                    'step': 0.01,
+                    'tooltip': 'Scale applied to high-frequency components. The higher the value, the more the final image will resemble the structure of the reference image.'
+                }),
+                'low_scale_start': ('FLOAT', {
+                    'default': 1.0,
+                    'min': -4.0,
+                    'max': 8.0,
+                    'step': 0.01,
+                    'tooltip': 'Scale applied to low-frequency components. Controls the strength of the style image.'
+                }),
+                'low_scale_end': ('FLOAT', {
+                    'default': 3.0,
+                    'min': -4.0,
+                    'max': 8.0,
+                    'step': 0.01,
+                    'tooltip': 'Scale applied to low-frequency components. Controls the strength of the style image.'
+                }),
+                'adain_strength': ('FLOAT', {
+                    'default': 0.5,
+                    'min': 0.0,
+                    'max': 1.0,
+                    'step': 0.01,
+                    'tooltip': 'AdaIN aligns the target style statistics toward the reference.'
+                }),
+                'blocks': ('STRING', {
+                    'default': '0-999',
+                    'tooltip': 'Block indices to which the reference attention patch is applied.'
+                }),
+                'verbose': ('BOOLEAN', {
+                    'default': False,
+                    'tooltip': 'Enable verbose logging.'
+                }),
             },
             'optional': {
                 'rf_inversion': ('LATENT',),
