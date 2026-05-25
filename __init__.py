@@ -2143,7 +2143,7 @@ class UnofficialExtensions:
                     'tooltip': 'Also apply AdaIN to value/V activations. Off keeps Q/K-only AdaIN.',
                 }),
                 'post_attention_adain_strength': ('FLOAT', {
-                    'default': 0.0,
+                    'default': 0.5,
                     'min': 0.0,
                     'max': 1.0,
                     'step': 0.01,
