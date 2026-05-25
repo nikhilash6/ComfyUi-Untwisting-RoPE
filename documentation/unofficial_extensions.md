@@ -1,6 +1,6 @@
 # Unofficial Extensions
 
-These options are experimental extensions and are not part of the original Untwisting RoPE paper.
+These options are experimental and are not part of the original Untwisting RoPE paper.
 
 ## `adain_on_v`
 
