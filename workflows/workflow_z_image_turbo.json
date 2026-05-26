@@ -830,29 +830,6 @@
       ]
     },
     {
-      "id": 611,
-      "type": "Note",
-      "pos": [
-        1135.7803046387965,
-        994.345855096394
-      ],
-      "size": [
-        289.0740052806825,
-        112.57343506692268
-      ],
-      "flags": {},
-      "order": 10,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "properties": {},
-      "widgets_values": [
-        "The only relevant values to change are :\n\n- high_scale_start: (between 1.0 and 1.15) \n- low_scale_end: (between 3.0 and 4.0)"
-      ],
-      "color": "#c09430",
-      "bgcolor": "rgba(24,24,27,.9)"
-    },
-    {
       "id": 626,
       "type": "Note",
       "pos": [
@@ -864,7 +841,7 @@
         126.58960944919556
       ],
       "flags": {},
-      "order": 11,
+      "order": 10,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -887,7 +864,7 @@
         82
       ],
       "flags": {},
-      "order": 12,
+      "order": 11,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -967,6 +944,29 @@
         "0-999",
         true
       ]
+    },
+    {
+      "id": 611,
+      "type": "Note",
+      "pos": [
+        1133.528142202805,
+        986.688469823161
+      ],
+      "size": [
+        289.0740052806825,
+        112.57343506692268
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "The only relevant values to change are :\n\n- beta: between 10 and 50\n- high_scale_start: (between 1.0 and 1.15) \n- low_scale_end: (between 3.0 and 4.0)"
+      ],
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
     }
   ],
   "links": [
@@ -1175,10 +1175,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.8140274938684048,
+      "scale": 0.7400249944258226,
       "offset": [
-        -692.7148474843156,
-        -749.7912642350701
+        -572.5401596060037,
+        -804.0052684700847
       ]
     },
     "frontendVersion": "1.44.19",
