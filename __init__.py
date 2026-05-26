@@ -2242,7 +2242,7 @@ class UntwistingRoPE:
                 }),
                 'blocks': ('STRING', {
                     'default': '0-999',
-                    'tooltip': 'Block indices to which the reference attention patch is applied.'
+                    'tooltip': 'Specify block ranges to patch, e.g -> 0-8, 28-37'
                 }),
                 'verbose': ('BOOLEAN', {
                     'default': False,
