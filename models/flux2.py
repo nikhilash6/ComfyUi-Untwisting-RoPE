@@ -275,7 +275,17 @@ def _local_cross_batch_adain_qk(xq, xk, cfg, target_bsz, strength, eps=1e-6, xv=
     return (xq, xk, xv) if return_v else (xq, xk)
 
 
-def _local_build_frequency_scale_vector(head_dim, axes_dims, high_scale, low_scale, beta, device, dtype):
+def _local_build_frequency_scale_vector(
+    head_dim,
+    axes_dims,
+    high_scale,
+    low_scale,
+    beta,
+    device,
+    dtype,
+    **_unused_runtime_options,
+):
+    """Generic fallback only. Node-specific runtime parameters live in __init__.py."""
     if not axes_dims or sum(int(x) for x in axes_dims) != int(head_dim):
         axes_dims = [int(head_dim)]
     axes_dims = [int(x) for x in axes_dims]
@@ -481,6 +491,7 @@ def patch_attention_modules(
                 beta,
                 k.device,
                 k.dtype,
+                runtime_cfg=cfg,
             ).view(1, 1, 1, int(head_dim))
 
             ref_k = k[target_bsz:target_bsz * 2, :, img_s:img_e, :] * scale_vec
