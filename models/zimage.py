@@ -209,7 +209,7 @@ def patch_attention_modules(dm: Any, stats: Any, helpers: dict[str, Any] | None 
                     cfg.get("axes_dims") or getattr(dm, "axes_dims", []),
                     high_scale, low_scale, beta, 
                     xk.device, xk.dtype,
-                    cfg.get("axis0_rope_scale", -1.0)
+                    runtime_cfg=cfg
                 ).view(1, 1, 1, self.head_dim)
 
                 ref_k = xk[target_bsz:target_bsz*2, img_s:img_e] * scale_vec
