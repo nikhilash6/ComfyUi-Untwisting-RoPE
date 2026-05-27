@@ -698,10 +698,6 @@ def _untwist_print_rope_scale_debug(
 
         print(f'{_PREFIX}   progress={progress:.6f}  sigma={sigma:.6f}')
         print(f'{_PREFIX}   low_scale={low_scale:.6f}  high_scale={high_scale:.6f}')
-        print(
-            f'{_PREFIX}   axis0_rope_mode={axis0_rope_mode}  '
-            f'axis0_rope_scale={axis0_rope_scale:.6f}'
-        )
         print(f'{_PREFIX}   axis0={_untwist_scale_range(axis0)}')
         print(f'{_PREFIX}   axis1+={_untwist_scale_range(axis1_plus)}')
     except Exception as exc:
