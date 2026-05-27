@@ -587,13 +587,130 @@ def _rf_print_prepared(
     print(f'{_RF_PREFIX} ═══════════════════════════════════════\n')
 
 
-def _untwist_print_input_ref(stats: Optional[_RuntimeStats], input_x: Any, ref_noisy: Any) -> None:
-    _vprint(
-        stats,
-        f'{_PREFIX}   input_x   mean={input_x.mean().item():.4f}  std={input_x.std().item():.4f}\n'
-        f'{_PREFIX}   ref_noisy mean={ref_noisy.mean().item():.4f}  std={ref_noisy.std().item():.4f}',
-    )
 
+def _untwist_format_scale_value(value: Any) -> str:
+    """Format one scale value for compact debug logs without noisy trailing zeros."""
+    try:
+        value_f = float(value)
+        if not math.isfinite(value_f):
+            return str(value_f)
+        text = f'{value_f:.6f}'.rstrip('0').rstrip('.')
+        return text if text else '0'
+    except Exception:
+        return 'n/a'
+
+
+def _untwist_scale_range(values: Any) -> str:
+    """Return a compact [first ... last] summary from a 1D scale tensor/list."""
+    try:
+        if torch.is_tensor(values):
+            if values.numel() <= 0:
+                return '[]'
+            flat = values.detach().float().flatten().to(device='cpu')
+        else:
+            flat = torch.as_tensor(values, dtype=torch.float32).flatten()
+            if flat.numel() <= 0:
+                return '[]'
+        first = _untwist_format_scale_value(float(flat[0].item()))
+        last = _untwist_format_scale_value(float(flat[-1].item()))
+        return f'[{first} ... {last}]'
+    except Exception:
+        return '[]'
+
+
+def _untwist_print_rope_scale_debug(
+    stats: Optional[_RuntimeStats],
+    cfg: Dict[str, Any],
+    module_name: str,
+    scale_vec: Any,
+) -> None:
+    """Print one compact RoPE scale-vector snapshot per UntwistingRoPE model call."""
+    if not _coerce_bool(getattr(stats, 'verbose', False)):
+        return
+    if not isinstance(cfg, dict) or cfg.get('_rope_scale_debug_printed', False):
+        return
+    if not cfg.get('enabled', False) or int(cfg.get('cross_batch_target_batch', 0)) <= 0:
+        return
+
+    cfg['_rope_scale_debug_printed'] = True
+
+    try:
+        if not torch.is_tensor(scale_vec):
+            scale_vec = torch.as_tensor(scale_vec)
+        flat = scale_vec.detach().flatten()
+        head_dim = int(flat.numel())
+        axes_dims = [int(x) for x in (cfg.get('axes_dims') or [])]
+        if not axes_dims or sum(axes_dims) != head_dim:
+            axes_dims = [head_dim]
+
+        if len(axes_dims) >= 2:
+            axis0_dim = max(0, min(int(axes_dims[0]), head_dim))
+            axis0 = flat[:axis0_dim]
+            axis1_plus = flat[axis0_dim:]
+        else:
+            axis0 = flat
+            axis1_plus = flat.new_empty((0,))
+
+        progress = float(cfg.get('progress', 0.0))
+        sigma = float(cfg.get('sigma', 0.0))
+        low_scale = float(cfg.get('_debug_low_scale', 0.0))
+        high_scale = float(cfg.get('_debug_high_scale', 0.0))
+
+        print(f'{_PREFIX}   progress={progress:.6f}  sigma={sigma:.6f}')
+        print(f'{_PREFIX}   low_scale={low_scale:.6f}  high_scale={high_scale:.6f}')
+        print(f'{_PREFIX}   axis0={_untwist_scale_range(axis0)}')
+        print(f'{_PREFIX}   axis1+={_untwist_scale_range(axis1_plus)}')
+    except Exception as exc:
+        print(f'{_PREFIX} ⚠ RoPE scale debug print failed: {exc}')
+
+
+def _untwist_print_rope_scale_debug_from_cfg(
+    stats: Optional[_RuntimeStats],
+    cfg: Dict[str, Any],
+    module_name: str,
+    device: Any,
+    dtype: Any,
+    build_frequency_scale_vector: Any,
+) -> None:
+    """Fallback RoPE debug print for adapter attention paths.
+
+    The actual scale-vector builder stays in the main module and is passed in here
+    so verbose_prints owns the formatting/printing without creating import cycles.
+    """
+    if not isinstance(cfg, dict) or cfg.get('_rope_scale_debug_printed', False):
+        return
+    if not callable(build_frequency_scale_vector):
+        return
+    try:
+        head_dim = int(cfg.get('head_dim', 0))
+        if head_dim <= 0:
+            return
+
+        progress = float(cfg.get('progress', 0.0))
+        high_start = float(cfg['high_scale_start'])
+        high_end = float(cfg['high_scale_end'])
+        low_start = float(cfg['low_scale_start'])
+        low_end = float(cfg['low_scale_end'])
+        high_scale = high_start + (high_end - high_start) * progress
+        low_scale = low_start + (low_end - low_start) * progress
+        beta = float(cfg.get('beta', 2.0))
+
+        cfg['_debug_high_scale'] = float(high_scale)
+        cfg['_debug_low_scale'] = float(low_scale)
+
+        scale_vec = build_frequency_scale_vector(
+            head_dim,
+            cfg.get('axes_dims') or [],
+            high_scale,
+            low_scale,
+            beta,
+            device,
+            dtype,
+            cfg.get('axis0_rope_scale', -1.0),
+        )
+        _untwist_print_rope_scale_debug(stats, cfg, module_name, scale_vec)
+    except Exception as exc:
+        print(f'{_PREFIX} ⚠ RoPE scale debug fallback failed: {exc}')
 
 def _untwist_print_patch_complete(stats: Optional[_RuntimeStats], rf_active: bool, adapter: Any) -> None:
     _vprint(stats, f'\n{_PREFIX} ═══════════════════════════════════════')
@@ -645,6 +762,9 @@ __all__ = [
     '_rf_print_direct_fallback',
     '_rf_print_traceback',
     '_rf_print_prepared',
-    '_untwist_print_input_ref',
+    '_untwist_format_scale_value',
+    '_untwist_scale_range',
+    '_untwist_print_rope_scale_debug',
+    '_untwist_print_rope_scale_debug_from_cfg',
     '_untwist_print_patch_complete',
 ]

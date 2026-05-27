@@ -1552,6 +1552,8 @@ def _patch_joint_attention_modules(dm, stats):
                 high_scale = _lerp(cfg['high_scale_start'], cfg['high_scale_end'], progress)
                 low_scale  = _lerp(cfg['low_scale_start'],  cfg['low_scale_end'],  progress)
                 beta       = float(cfg.get('beta', 2.0))
+                cfg['_debug_high_scale'] = float(high_scale)
+                cfg['_debug_low_scale'] = float(low_scale)
 
                 if cfg.get('apply_adain') and float(cfg.get('adain_strength', 0)) > 0:
                     xq, xk = xq.clone(), xk.clone()
@@ -1569,6 +1571,8 @@ def _patch_joint_attention_modules(dm, stats):
                     xk.device, xk.dtype,
                     cfg.get('axis0_rope_scale', -1.0),
                 ).view(1, 1, 1, self.head_dim)
+
+                vp._untwist_print_rope_scale_debug(stats, cfg, module_name, scale_vec)
 
                 ref_k_pieces, ref_v_pieces = [], []
                 for s, e in ref_ranges:
@@ -1749,6 +1753,14 @@ def _adapter_helpers() -> Dict[str, Any]:
         'lerp': _lerp,
         'cross_batch_adain_qk': _cross_batch_adain_qk,
         'build_frequency_scale_vector': _build_frequency_scale_vector,
+        'print_rope_scale_debug': vp._untwist_print_rope_scale_debug,
+        'print_rope_scale_debug_from_cfg': (
+            lambda stats, cfg, module_name, device, dtype:
+                vp._untwist_print_rope_scale_debug_from_cfg(
+                    stats, cfg, module_name, device, dtype,
+                    _build_frequency_scale_vector,
+                )
+        ),
         'patch_context_refiner_mask_modules': _patch_context_refiner_mask_modules,
         'patch_patchify_and_embed': _patch_patchify_and_embed,
         'patch_joint_attention_modules': _patch_joint_attention_modules,
@@ -2424,6 +2436,8 @@ class UntwistingRoPE:
                 'axis0_rope_scale': axis0_rope_scale,
                 'cross_batch_target_batch': target_b if rf_active else 0,
                 'progress': progress,
+                'sigma': sigma,
+                'wrapper_call': call_n,
             }
             default_cfg = getattr(adapter, 'default_runtime_cfg', lambda _dm=None: {})
             cfg.update(default_cfg(dm))
@@ -2436,8 +2450,6 @@ class UntwistingRoPE:
             rf_cache_hit = False
             rf_cond_mode = 'not-connected'
             ref_mode = 'target-only'
-            # These input/ref-noisy lines belong to the UntwistingRoPE node,
-            # so they must follow the UntwistingRoPE verbose toggle, not RFInversion's.
             should_print = vp._coerce_bool(getattr(stats, 'verbose', False))
 
             if rf_active and torch.is_tensor(ref_clean_cpu):
@@ -2583,9 +2595,6 @@ class UntwistingRoPE:
 
                     ref_noisy = _repeat_to_batch(cached.to(device=input_x.device, dtype=input_x.dtype), target_b)
 
-                    if should_print:
-                        vp._untwist_print_input_ref(stats, input_x, ref_noisy)
-
                     if ref_noisy.shape[-2:] == input_x.shape[-2:]:
                         input_for_model = torch.cat([input_x, ref_noisy], dim=0)
                         try:
@@ -2641,6 +2650,12 @@ class UntwistingRoPE:
             else:
                 raw_result = apply_model(input_for_model, timestep_for_model, **c)
 
+            if should_print:
+                vp._untwist_print_rope_scale_debug_from_cfg(
+                    stats, cfg, 'model_wrapper', input_x.device, input_x.dtype,
+                    _build_frequency_scale_vector,
+                )
+
             if (rf_active
                     and ref_noisy is not None
                     and torch.is_tensor(raw_result)
@@ -2656,8 +2671,6 @@ class UntwistingRoPE:
                 except Exception as exc:
                     print(f'{vp._PREFIX} ⚠ Failed to cache RF debug latents at σ={float(sigma):.6f}: {exc}')
 
-                if should_print:
-                    pass
                 return target_pred
 
             return raw_result
