@@ -2176,15 +2176,16 @@ class UnofficialExtensions:
                     'tooltip': 'Blend strength for matching the target attention output to the reference attention output. 0 disables it.',
                 }),
                 'axis0_rope_mode': (['default', 'match_axes', 'constant'], {
-                    'default': 'default',
+                    'default': 'match_axes',
                     'tooltip': (
-                        'Axis-0 RoPE behavior. default keeps the legacy flat low-scale axis 0; '
-                        'match_axes makes axis 0 use the same curve as axes 1+; '
-                        'constant uses axis0_rope_scale.'
+                        'Axis-0 RoPE behavior.\n'
+                        'default -> Its values are equal to low_scale;\n'
+                        'match_axes -> makes axis 0 use the same curve as axes 1+;\n'
+                        'constant -> uses axis0_rope_scale.'
                     ),
                 }),
                 'axis0_rope_scale': ('FLOAT', {
-                    'default': 0.0,
+                    'default': 1.0,
                     'min': 0.0,
                     'max': 8.0,
                     'step': 0.01,
