@@ -1207,7 +1207,8 @@ def _build_frequency_scale_vector(
     if not axes_dims or sum(int(x) for x in axes_dims) != head_dim:
         axes_dims = [head_dim]
     axes_dims = [int(x) for x in axes_dims]
-    is_3axis  = len(axes_dims) == 3
+
+    has_separate_axis0 = len(axes_dims) >= 2
 
     legacy_axis0_scale = None
     if isinstance(runtime_cfg, dict):
@@ -1236,7 +1237,7 @@ def _build_frequency_scale_vector(
         if n_pairs <= 0:
             pieces.append(torch.ones(axis_dim, device=device, dtype=dtype))
             continue
-        if is_3axis and axis_idx == 0:
+        if has_separate_axis0 and axis_idx == 0:
             if axis0_rope_mode == 'match_axes':
                 # Axis 0 uses the same per-pair curve as axes 1+.
                 pair_scales = _curve_scales(n_pairs)
