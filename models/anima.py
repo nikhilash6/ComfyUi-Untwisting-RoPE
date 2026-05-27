@@ -380,8 +380,7 @@ def patch_attention_modules(dm: Any, stats: Any, helpers: dict[str, Any] | None 
         setattr(module, "_untwist_adapter_active", True)
         installed += 1
 
-    assert installed > 0, f"{prefix} FATAL: No compatible self-attention modules patched."
-    return matched, installed, restored
+    return matched, installed, restored, patched_names
 
 
 def uses_reference_branch_kv() -> bool:
