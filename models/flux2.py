@@ -296,33 +296,6 @@ def _flux_slice_mask(mask: Any, start: int, end: int):
     return mask[int(start): int(end)]
 
 
-def _flux_adain_qkv_for_image_range(q, k, v, cfg, target_bsz: int, image_range, cross_batch_adain_qk):
-    """Run AdaIN on FLUX [B,H,S,D] tensors over image tokens."""
-    if not cfg.get("apply_adain") or float(cfg.get("adain_strength", 0.0)) <= 0.0:
-        return q, k, v
-
-    s, e = int(image_range[0]), int(image_range[1])
-    if e <= s:
-        return q, k, v
-
-    # Existing helper expects [B,S,H,D]. FLUX attention uses [B,H,S,D].
-    q_sh = q.movedim(1, 2).clone()
-    k_sh = k.movedim(1, 2).clone()
-    v_sh = v.movedim(1, 2).clone() if _coerce_bool(cfg.get("adain_on_v", False)) else None
-
-    cfg_local = dict(cfg)
-    cfg_local["target_qk_adain_ranges"] = [(s, e)]
-    out = cross_batch_adain_qk(
-        q_sh, k_sh, cfg_local, target_bsz, float(cfg["adain_strength"]), xv=v_sh
-    )
-
-    if v_sh is not None:
-        q_sh, k_sh, v_sh = out
-        v = v_sh.movedim(1, 2)
-    else:
-        q_sh, k_sh = out
-    return q_sh.movedim(1, 2), k_sh.movedim(1, 2), v
-
 
 # ---------------------------------------------------------------------------
 # Optional conditioning / patch hooks
@@ -355,15 +328,15 @@ def patch_attention_modules(
     prefix = str(helpers.get("prefix", "[UntwistingRoPE]"))
     config_key = str(helpers.get("config_key", "untwisting_rope"))
 
-    required_helpers = ("lerp", "cross_batch_adain_qk", "build_frequency_scale_vector", "apply_qkv_shared_effects")
+    required_helpers = ("lerp", "build_frequency_scale_vector", "apply_qkv_shared_effects", "apply_attention_output_shared_effects")
     missing = [name for name in required_helpers if not callable(helpers.get(name))]
     if missing:
         raise RuntimeError(f"{DISPLAY_NAME} adapter missing required helper(s): {missing}")
 
     lerp = helpers["lerp"]
-    cross_batch_adain_qk = helpers["cross_batch_adain_qk"]
     build_frequency_scale_vector = helpers["build_frequency_scale_vector"]
     apply_qkv_shared_effects = helpers["apply_qkv_shared_effects"]
+    apply_attention_output_shared_effects = helpers["apply_attention_output_shared_effects"]
 
     try:
         from comfy.ldm.flux.layers import apply_mod
@@ -417,10 +390,6 @@ def patch_attention_modules(
                 stats.attn_calls += 1
             if hasattr(stats, "adapter_attn_calls"):
                 stats.adapter_attn_calls += 1
-
-            q, k, v = _flux_adain_qkv_for_image_range(
-                q, k, v, cfg, target_bsz, (img_s, img_e), cross_batch_adain_qk
-            )
 
             q, k, v = apply_qkv_shared_effects(
                 q, k, v,
@@ -476,10 +445,14 @@ def patch_attention_modules(
                 skip_reshape=True, transformer_options=transformer_options,
             )
 
-            post_a = _coerce_strength01(cfg.get("post_attention_adain_strength", 0.0))
-            if post_a > 0.0:
-                out_t_adain = _adain(out_t, out_r, eps=1e-6)
-                out_t = out_t * (1.0 - post_a) + out_t_adain * post_a
+            out_t, out_r = apply_attention_output_shared_effects(
+                out_t, out_r,
+                cfg,
+                target_bsz,
+                module_name,
+                layout="BSD",
+                token_ranges=[(img_s, img_e)],
+            )
 
             outs = [out_t, out_r]
             if bsz > target_bsz * 2:
