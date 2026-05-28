@@ -81,17 +81,6 @@ def _adain(target: torch.Tensor, style: torch.Tensor, eps: float = 1e-6) -> torc
     s_std = style.float().var(dim=1, keepdim=True, unbiased=False).add(eps).sqrt().to(target.dtype)
     return (target - t_mean) / t_std * s_std + s_mean
 
-def _coerce_strength01(value: Any, default: float = 0.0) -> float:
-    try:
-        strength = float(value)
-    except Exception as exc:
-        raise ValueError(f"Invalid strength value {value!r}; expected a finite float in [0, 1].") from exc
-    if not torch.isfinite(torch.tensor(strength)):
-        raise ValueError(f"Invalid strength value {value!r}; expected a finite float in [0, 1].")
-    if not 0.0 <= strength <= 1.0:
-        raise ValueError(f"Invalid strength value {strength!r}; expected value in [0, 1].")
-    return strength
-
 def _lerp(a: float, b: float, t: float) -> float:
     return float(a + (b - a) * t)
 
