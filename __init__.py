@@ -1611,6 +1611,23 @@ def _patch_joint_attention_modules(dm, stats):
                         f'Untwisting attention failed in {module_name}: no reference K/V token ranges were available.'
                     )
 
+                # Value tensor injection / interpolation: push the target content/texture
+                # stream toward the paired reference stream before reference K/V concat.
+                v_inj = _coerce_strength01(cfg.get('v_injection_strength', 0.0))
+                if v_inj > 0.0:
+                    try:
+                        xv = xv.clone()
+                        xv_r_aligned = xv[target_bsz:target_bsz * 2, :seqlen]
+                        xv[:target_bsz, :seqlen] = (
+                            xv[:target_bsz, :seqlen] * (1.0 - v_inj)
+                            + xv_r_aligned * v_inj
+                        )
+                        cfg['_debug_v_injection_strength'] = float(v_inj)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f'Untwisting attention failed in {module_name}: V tensor injection shape alignment failed.'
+                        ) from exc
+
                 xq_t = xq[:target_bsz]
                 xk_t = torch.cat([xk[:target_bsz]] + ref_k_pieces, dim=1)
                 xv_t = torch.cat([xv[:target_bsz]] + ref_v_pieces, dim=1)
@@ -2191,18 +2208,27 @@ class UnofficialExtensions:
                     'step': 0.01,
                     'tooltip': 'Non-negative Axis-0 RoPE scale used only when axis0_rope_mode is constant.',
                 }),
+                'v_injection_strength': ('FLOAT', {
+                    'default': 0.0,
+                    'min': 0.0,
+                    'max': 1.0,
+                    'step': 0.01,
+                    'tooltip': 'Linearly blends the target V tensor with the reference V tensor.',
+                }),
             },
         }
 
     def build(
         self,
         adain_on_v: bool = False,
+        v_injection_strength: float = 0.0,
         post_attention_adain_strength: float = 0.0,
         axis0_rope_mode: str = 'default',
         axis0_rope_scale: float = 0.0,
     ):
         return ({
             'adain_on_v': vp._coerce_bool(adain_on_v),
+            'v_injection_strength': _coerce_strength01(v_injection_strength),
             'post_attention_adain_strength': _coerce_strength01(post_attention_adain_strength),
             'axis0_rope_mode': _coerce_axis0_rope_mode(axis0_rope_mode),
             'axis0_rope_scale': _coerce_axis0_rope_scale(axis0_rope_scale, default=0.0),
@@ -2310,6 +2336,7 @@ class UntwistingRoPE:
 
         ext_cfg = unofficial_extensions if isinstance(unofficial_extensions, dict) else {}
         adain_on_v = vp._coerce_bool(ext_cfg.get('adain_on_v', False))
+        v_injection_strength = _coerce_strength01(ext_cfg.get('v_injection_strength', 0.0))
         post_attention_adain_strength = _coerce_strength01(ext_cfg.get('post_attention_adain_strength', 0.0))
         axis0_rope_mode = _coerce_axis0_rope_mode(
             ext_cfg.get('axis0_rope_mode', None),
@@ -2336,6 +2363,7 @@ class UntwistingRoPE:
             f'{vp._PREFIX} blocks: {blocks if blocks.strip() else "all"}  '
             f'adain={adain_strength:.2f}  '
             f'unofficial: adain_on_v={adain_on_v}  '
+            f'v_injection_strength={v_injection_strength:.2f}  '
             f'post_attention_adain_strength={post_attention_adain_strength:.2f}  '
             f'axis0_rope_mode={axis0_rope_mode}  '
             f'axis0_rope_scale={axis0_rope_scale:.3f}'
@@ -2388,6 +2416,8 @@ class UntwistingRoPE:
                     
                     if installed == 0:
                         raise RuntimeError(f'{vp._PREFIX} No {disp_name} attention blocks were patched.')
+
+                    _patch_joint_attention_modules(dm, stats)
             else:
                 _patch_context_refiner_mask_modules(dm, stats)
                 _patch_patchify_and_embed(dm, stats)
@@ -2424,6 +2454,7 @@ class UntwistingRoPE:
                 'apply_adain': True,
                 'adain_strength': float(adain_strength),
                 'adain_on_v': adain_on_v,
+                'v_injection_strength': v_injection_strength,
                 'post_attention_adain_strength': post_attention_adain_strength,
                 'axis0_rope_mode': axis0_rope_mode,
                 'axis0_rope_scale': axis0_rope_scale,
