@@ -355,7 +355,7 @@ def patch_attention_modules(
     prefix = str(helpers.get("prefix", "[UntwistingRoPE]"))
     config_key = str(helpers.get("config_key", "untwisting_rope"))
 
-    required_helpers = ("lerp", "cross_batch_adain_qk", "build_frequency_scale_vector")
+    required_helpers = ("lerp", "cross_batch_adain_qk", "build_frequency_scale_vector", "apply_qkv_shared_effects")
     missing = [name for name in required_helpers if not callable(helpers.get(name))]
     if missing:
         raise RuntimeError(f"{DISPLAY_NAME} adapter missing required helper(s): {missing}")
@@ -363,6 +363,7 @@ def patch_attention_modules(
     lerp = helpers["lerp"]
     cross_batch_adain_qk = helpers["cross_batch_adain_qk"]
     build_frequency_scale_vector = helpers["build_frequency_scale_vector"]
+    apply_qkv_shared_effects = helpers["apply_qkv_shared_effects"]
 
     try:
         from comfy.ldm.flux.layers import apply_mod
@@ -419,6 +420,15 @@ def patch_attention_modules(
 
             q, k, v = _flux_adain_qkv_for_image_range(
                 q, k, v, cfg, target_bsz, (img_s, img_e), cross_batch_adain_qk
+            )
+
+            q, k, v = apply_qkv_shared_effects(
+                q, k, v,
+                cfg,
+                target_bsz,
+                module_name,
+                layout="BHSD",
+                token_ranges=[(img_s, img_e)],
             )
 
             # Apply RoPE before appending reference K/V, matching ComfyUI's FLUX attention path.
