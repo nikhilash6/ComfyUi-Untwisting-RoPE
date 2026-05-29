@@ -1368,24 +1368,33 @@ def _apply_qkv_shared_effects(
         cfg['_debug_qk_adain_module'] = str(module_name)
         cfg['_debug_qk_adain_ranges'] = list(ranges)
 
-    # Shared V injection: interpolate target V toward paired reference V.
-    # This intentionally lives in the core, not in individual adapters.
-    v_inj = _coerce_strength01(cfg.get('v_injection_strength', 0.0))
-    if v_inj > 0.0:
+    # Shared orthogonal V injection:
+    ortho_v_inj = _coerce_strength01(cfg.get('orthogonal_v_injection', 0.0))
+    if ortho_v_inj > 0.0:
         v_bshd = v_bshd.clone()
         for s, e in ranges:
             v_t = v_bshd[:target_bsz, s:e]
             v_r = v_bshd[target_bsz:target_bsz * 2, s:e]
             if v_t.shape != v_r.shape:
                 raise RuntimeError(
-                    f'{vp._PREFIX} shared V injection failed in {module_name}: '
+                    f'{vp._PREFIX} shared orthogonal V injection failed in {module_name}: '
                     f'target/ref V range shape mismatch: target={tuple(v_t.shape)} ref={tuple(v_r.shape)}.'
                 )
-            v_bshd[:target_bsz, s:e] = v_t * (1.0 - v_inj) + v_r * v_inj
 
-        cfg['_debug_v_injection_strength'] = float(v_inj)
-        cfg['_debug_v_injection_module'] = str(module_name)
-        cfg['_debug_v_injection_ranges'] = list(ranges)
+            # Gram-Schmidt projection over the feature/head-dim axis. Use fp32
+            # for the dot products to avoid fp16/bf16 cancellation, then cast
+            # back to the model dtype for the in-place replacement.
+            v_t_proj = v_t.float()
+            v_r_proj = v_r.float()
+            dot_tr = (v_t_proj * v_r_proj).sum(dim=-1, keepdim=True)
+            dot_tt = (v_t_proj * v_t_proj).sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            v_r_collinear = (dot_tr / dot_tt) * v_t_proj
+            v_r_orthogonal = (v_r_proj - v_r_collinear).to(dtype=v_t.dtype)
+            v_bshd[:target_bsz, s:e] = v_t + (v_r_orthogonal * ortho_v_inj)
+
+        cfg['_debug_orthogonal_v_injection_strength'] = float(ortho_v_inj)
+        cfg['_debug_orthogonal_v_injection_module'] = str(module_name)
+        cfg['_debug_orthogonal_v_injection_ranges'] = list(ranges)
 
     return restore(q_bshd, k_bshd, v_bshd)
 
@@ -2393,12 +2402,12 @@ class UnofficialExtensions:
                     'step': 0.01,
                     'tooltip': 'RoPE scale used only when axis0_rope_mode = constant.',
                 }),
-                'v_injection_strength': ('FLOAT', {
+                'orthogonal_v_injection': ('FLOAT', {
                     'default': 0.0,
                     'min': 0.0,
                     'max': 1.0,
-                    'step': 0.01,
-                    'tooltip': 'Linearly blends the target V tensor with the reference V tensor.',
+                    'step': 0.05,
+                    'tooltip': 'Injects the reference V tensor strictly in the orthogonal null-space of the target V tensor.',
                 }),
             },
         }
@@ -2406,14 +2415,14 @@ class UnofficialExtensions:
     def build(
         self,
         adain_on_v: bool = False,
-        v_injection_strength: float = 0.0,
+        orthogonal_v_injection: float = 0.0,
         post_attention_adain_strength: float = 0.0,
         axis0_rope_mode: str = 'default',
         axis0_rope_scale: float = 0.0,
     ):
         return ({
             'adain_on_v': vp._coerce_bool(adain_on_v),
-            'v_injection_strength': _coerce_strength01(v_injection_strength),
+            'orthogonal_v_injection': _coerce_strength01(orthogonal_v_injection),
             'post_attention_adain_strength': _coerce_strength01(post_attention_adain_strength),
             'axis0_rope_mode': _coerce_axis0_rope_mode(axis0_rope_mode),
             'axis0_rope_scale': _coerce_axis0_rope_scale(axis0_rope_scale, default=0.0),
@@ -2521,7 +2530,7 @@ class UntwistingRoPE:
 
         ext_cfg = unofficial_extensions if isinstance(unofficial_extensions, dict) else {}
         adain_on_v = vp._coerce_bool(ext_cfg.get('adain_on_v', False))
-        v_injection_strength = _coerce_strength01(ext_cfg.get('v_injection_strength', 0.0))
+        orthogonal_v_injection = _coerce_strength01(ext_cfg.get('orthogonal_v_injection', 0.0))
         post_attention_adain_strength = _coerce_strength01(ext_cfg.get('post_attention_adain_strength', 0.0))
         axis0_rope_mode = _coerce_axis0_rope_mode(
             ext_cfg.get('axis0_rope_mode', None),
@@ -2548,7 +2557,7 @@ class UntwistingRoPE:
             f'{vp._PREFIX} blocks: {blocks if blocks.strip() else "all"}  '
             f'adain={adain_strength:.2f}  '
             f'unofficial: adain_on_v={adain_on_v}  '
-            f'v_injection_strength={v_injection_strength:.2f}  '
+            f'orthogonal_v_injection={orthogonal_v_injection:.2f}  '
             f'post_attention_adain_strength={post_attention_adain_strength:.2f}  '
             f'axis0_rope_mode={axis0_rope_mode}  '
             f'axis0_rope_scale={axis0_rope_scale:.3f}'
@@ -2638,7 +2647,7 @@ class UntwistingRoPE:
                 'apply_adain': True,
                 'adain_strength': float(adain_strength),
                 'adain_on_v': adain_on_v,
-                'v_injection_strength': v_injection_strength,
+                'orthogonal_v_injection': orthogonal_v_injection,
                 'post_attention_adain_strength': post_attention_adain_strength,
                 'axis0_rope_mode': axis0_rope_mode,
                 'axis0_rope_scale': axis0_rope_scale,
