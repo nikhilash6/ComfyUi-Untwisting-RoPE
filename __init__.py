@@ -14,6 +14,7 @@ from comfy.ldm.flux.math import apply_rope
 from comfy.ldm.modules.attention import optimized_attention_masked
 
 from . import verbose_prints as vp
+from .sdpa_fix import install_optimized_attention_override as _maybe_install_untwist_attention_override
 
 _TRANSFORMER_CONFIG_KEY = model_adapters.CONFIG_KEY
 
@@ -2184,6 +2185,9 @@ class RFInversion:
             timestep = args.get('timestep', None)
             c_in = args.get('c', {})
             c = c_in.copy() if isinstance(c_in, dict) else {}
+            to = c.get('transformer_options', {}).copy()
+            _maybe_install_untwist_attention_override(to)
+            c['transformer_options'] = to
             sigma = _sigma_from_timestep(timestep) if torch.is_tensor(timestep) else 1.0
             sigma_key = round(float(sigma), 6)
             state['last_sigma'] = sigma_key
@@ -2607,6 +2611,7 @@ class UntwistingRoPE:
             c = args['c'].copy()
             cond_or_uncond = args.get('cond_or_uncond', None)
             to = c.get('transformer_options', {}).copy()
+            _maybe_install_untwist_attention_override(to)
 
             sigma = _sigma_from_timestep(timestep)
             progress = _sigma_to_progress(timestep)
