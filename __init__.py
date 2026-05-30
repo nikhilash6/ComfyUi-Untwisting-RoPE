@@ -2823,6 +2823,8 @@ class UntwistingRoPE:
                             f'ref_noisy={tuple(ref_noisy.shape[-2:])}. '
                             f'Make sure the resolution of the reference image fed into the RF inversion node matches the final image resolution (same width and height).'
                         )
+                except RuntimeError:
+                    raise
                 except Exception as exc:
                     raise RuntimeError('UntwistingRoPE RF latent preparation failed.') from exc
 
