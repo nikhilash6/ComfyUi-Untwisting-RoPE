@@ -1382,6 +1382,31 @@ def _apply_qkv_shared_effects(
         cfg['_debug_qk_adain_module'] = str(module_name)
         cfg['_debug_qk_adain_ranges'] = list(ranges)
 
+    # Shared key-subspace Gram-Schmidt alignment:
+    key_subspace = _coerce_strength01(cfg.get('key_subspace_alignment', 0.0))
+    if key_subspace > 0.0:
+        k_bshd = k_bshd.clone()
+        for s, e in ranges:
+            k_t = k_bshd[:target_bsz, s:e]
+            k_r = k_bshd[target_bsz:target_bsz * 2, s:e]
+            if k_t.shape != k_r.shape:
+                raise RuntimeError(
+                    f'{vp._PREFIX} shared key-subspace alignment failed in {module_name}: '
+                    f'target/ref K range shape mismatch: target={tuple(k_t.shape)} ref={tuple(k_r.shape)}.'
+                )
+
+            k_tf = k_t.float()
+            k_rf = k_r.float()
+            dot_num = (k_tf * k_rf).sum(dim=-1, keepdim=True)
+            dot_den = (k_rf * k_rf).sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            proj = k_rf * (dot_num / dot_den)
+            aligned = k_tf * (1.0 - key_subspace) + proj * key_subspace
+            k_bshd[:target_bsz, s:e] = aligned.to(dtype=k_bshd.dtype)
+
+        cfg['_debug_key_subspace_alignment_strength'] = float(key_subspace)
+        cfg['_debug_key_subspace_alignment_module'] = str(module_name)
+        cfg['_debug_key_subspace_alignment_ranges'] = list(ranges)
+
     # Shared cosine-gated V injection:
     cosine_v_inj = _coerce_strength01(cfg.get('cosine_gated_v_injection', 0.0))
     if cosine_v_inj > 0.0:
@@ -2432,6 +2457,16 @@ class UnofficialExtensions:
                         'Applies V AdaIN only on high-reference-variance channels. '
                     ),
                 }),
+                'key_subspace_alignment': ('FLOAT', {
+                    'default': 0.0,
+                    'min': 0.0,
+                    'max': 1.0,
+                    'step': 0.01,
+                    'tooltip': (
+                        'Projects target keys onto reference keys to restrict routing '
+                        'toward the reference key subspace.'
+                    ),
+                }),
             },
         }
 
@@ -2443,6 +2478,7 @@ class UnofficialExtensions:
         cosine_gated_v_injection: float = 0.0,
         attention_entropy_scaling: float = 0.0,
         variance_gated_v_adain: float = 0.0,
+        key_subspace_alignment: float = 0.0,
     ):
         return ({
             'post_attention_adain_strength': _coerce_strength01(post_attention_adain_strength),
@@ -2451,6 +2487,7 @@ class UnofficialExtensions:
             'cosine_gated_v_injection': _coerce_strength01(cosine_gated_v_injection),
             'attention_entropy_scaling': _coerce_strength01(attention_entropy_scaling),
             'variance_gated_v_adain': _coerce_strength01(variance_gated_v_adain),
+            'key_subspace_alignment': _coerce_strength01(key_subspace_alignment),
         },)
 
 class UntwistingRoPE:
@@ -2563,6 +2600,7 @@ class UntwistingRoPE:
         )
         axis0_rope_scale = _coerce_axis0_rope_scale(ext_cfg.get('axis0_rope_scale', 0.0), default=0.0)
         attention_entropy_scaling = _coerce_strength01(ext_cfg.get('attention_entropy_scaling', 0.0))
+        key_subspace_alignment = _coerce_strength01(ext_cfg.get('key_subspace_alignment', 0.0))
 
         if rf_active:
             stats.rf_sigma_cache = rf_state.get('cache', {}) if isinstance(rf_state.get('cache', {}), dict) else {}
@@ -2588,7 +2626,8 @@ class UntwistingRoPE:
             f'post_attention_adain_strength={post_attention_adain_strength:.2f}  '
             f'axis0_rope_mode={axis0_rope_mode}  '
             f'axis0_rope_scale={axis0_rope_scale:.3f}  '
-            f'attention_entropy_scaling={attention_entropy_scaling:.2f}'
+            f'attention_entropy_scaling={attention_entropy_scaling:.2f}  '
+            f'key_subspace_alignment={key_subspace_alignment:.2f}'
         )
         vp._vprint(stats, f'{vp._PREFIX} RF latent connected: {rf_active}  source={rf_source}')
         if rf_active:
@@ -2682,6 +2721,7 @@ class UntwistingRoPE:
                 'axis0_rope_mode': axis0_rope_mode,
                 'axis0_rope_scale': axis0_rope_scale,
                 'attention_entropy_scaling': attention_entropy_scaling,
+                'key_subspace_alignment': key_subspace_alignment,
                 'cross_batch_target_batch': target_b if rf_active else 0,
                 'progress': progress,
                 'sigma': sigma,
