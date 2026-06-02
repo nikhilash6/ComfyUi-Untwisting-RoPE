@@ -248,355 +248,6 @@ def _rf_print_step_quality(
     )
     return step_speed
 
-def _rf_tensor_mae(a: Any, b: Any) -> Optional[float]:
-    if not (torch.is_tensor(a) and torch.is_tensor(b)):
-        return None
-    try:
-        aa = a.detach().float().to(device='cpu')
-        bb = b.detach().float().to(device='cpu')
-        if aa.shape != bb.shape or aa.numel() == 0:
-            return None
-        return float((aa - bb).abs().mean().item())
-    except Exception as exc:
-        raise RuntimeError(f'{_RF_PREFIX} tensor MAE failed; strict mode refuses to hide diagnostic failure: {exc}') from exc
-
-def _rf_tensor_rmse(a: Any, b: Any) -> Optional[float]:
-    if not (torch.is_tensor(a) and torch.is_tensor(b)):
-        return None
-    try:
-        aa = a.detach().float().to(device='cpu')
-        bb = b.detach().float().to(device='cpu')
-        if aa.shape != bb.shape or aa.numel() == 0:
-            return None
-        return float((aa - bb).pow(2).mean().sqrt().item())
-    except Exception as exc:
-        raise RuntimeError(f'{_RF_PREFIX} tensor RMSE failed; strict mode refuses to hide diagnostic failure: {exc}') from exc
-
-def _rf_tensor_cosine(a: Any, b: Any) -> Optional[float]:
-    if not (torch.is_tensor(a) and torch.is_tensor(b)):
-        return None
-    try:
-        aa = a.detach().float().flatten().to(device='cpu')
-        bb = b.detach().float().flatten().to(device='cpu')
-        if aa.shape != bb.shape or aa.numel() == 0:
-            return None
-        denom = aa.norm() * bb.norm()
-        if float(denom.item()) <= 1e-12:
-            return None
-        return float(torch.dot(aa, bb).div(denom).item())
-    except Exception as exc:
-        raise RuntimeError(f'{_RF_PREFIX} tensor cosine failed; strict mode refuses to hide diagnostic failure: {exc}') from exc
-
-def _rf_diagnostic_level(summary: Dict[str, Any]) -> str:
-    """Return a conservative numerical-health classification for the RF trajectory."""
-    if not summary.get('finite_all', False):
-        return 'FAIL'
-    final_std = summary.get('final_std')
-    final_max_abs = summary.get('final_max_abs')
-    final_eps_std_ratio = summary.get('final_eps_std_ratio')
-
-    # These thresholds are intentionally broad and only detect numerical collapse/divergence,
-    # not subjective image quality or semantic faithfulness.
-    try:
-        if final_std is not None and float(final_std) < 0.05:
-            return 'FAIL'
-        if final_std is not None and float(final_std) > 20.0:
-            return 'FAIL'
-        if final_max_abs is not None and float(final_max_abs) > 100.0:
-            return 'FAIL'
-        if final_eps_std_ratio is not None and (
-            float(final_eps_std_ratio) < 0.25 or float(final_eps_std_ratio) > 4.0
-        ):
-            return 'WARN'
-    except Exception as exc:
-        raise RuntimeError(f'{_RF_PREFIX} diagnostic-level calculation failed; strict mode refuses to downgrade to WARN: {exc}') from exc
-    return 'PASS'
-
-def _rf_stability_summary(
-    ref_clean: torch.Tensor,
-    eps: torch.Tensor,
-    cache: Dict[float, torch.Tensor],
-    sigmas: List[float],
-) -> Dict[str, Any]:
-    """Collect explicit RF trajectory sanity metrics without changing sampling."""
-    keys = sorted(float(k) for k in cache.keys() if isinstance(k, (int, float)))
-    summary: Dict[str, Any] = {
-        'cache_items': len(cache),
-        'sigmas': len(sigmas or []),
-        'first_sigma': keys[0] if keys else None,
-        'last_sigma': keys[-1] if keys else None,
-        'finite_all': True,
-        'level': 'WARN',
-        'warnings': [],
-    }
-    if not keys:
-        summary['finite_all'] = False
-        summary['warnings'].append('cache_empty')
-        summary['level'] = 'FAIL'
-        return summary
-
-    stds: List[float] = []
-    max_abs_values: List[float] = []
-    tail_ratio_values: List[float] = []
-    bad_keys: List[float] = []
-    prev_tensor: Optional[torch.Tensor] = None
-    prev_sigma: Optional[float] = None
-    prev_speed: Optional[float] = None
-
-    dz_values: List[float] = []
-    path_speed_values: List[float] = []
-    path_roughness_values: List[float] = []
-
-    linear_mae_values: List[float] = []
-    linear_rmse_values: List[float] = []
-    linear_cos_values: List[float] = []
-    mean_drift_values: List[float] = []
-    std_ratio_drift_values: List[float] = []
-
-    # Avoid repeatedly moving ref/eps for every cache item if tensors share device/dtype.
-    ref_eps_cache: Dict[str, Any] = {}
-
-    def _ref_eps_like(like: torch.Tensor):
-        key = f'{like.device}:{like.dtype}'
-        if key not in ref_eps_cache:
-            ref_eps_cache[key] = (
-                ref_clean.detach().to(device=like.device, dtype=torch.float32),
-                eps.detach().to(device=like.device, dtype=torch.float32),
-            )
-        return ref_eps_cache[key]
-
-    for k in keys:
-        t = cache.get(k)
-        st = _rf_tensor_stats(t)
-
-        if not st.get('finite', False):
-            bad_keys.append(k)
-            summary['finite_all'] = False
-
-        std = st.get('std')
-        max_abs = st.get('max_abs')
-
-        std_f = float(std) if std is not None else None
-        max_abs_f = float(max_abs) if max_abs is not None else None
-
-        if std_f is not None:
-            stds.append(std_f)
-        if max_abs_f is not None:
-            max_abs_values.append(max_abs_f)
-        if std_f is not None and std_f > 1e-12 and max_abs_f is not None:
-            tail_ratio_values.append(max_abs_f / std_f)
-
-        if torch.is_tensor(t):
-            x = t.detach().float()
-
-            # Existing raw step movement plus new Δσ-normalized movement.
-            if torch.is_tensor(prev_tensor) and prev_tensor.shape == t.shape:
-                try:
-                    prev_x = prev_tensor.detach().float().to(device=x.device)
-                    dz = float((x - prev_x).abs().mean().item())
-                    dz_values.append(dz)
-
-                    if prev_sigma is not None:
-                        ds = abs(float(k) - float(prev_sigma))
-                        if ds > 1e-12:
-                            speed = dz / ds
-                            path_speed_values.append(speed)
-                            if prev_speed is not None:
-                                path_roughness_values.append(abs(speed - prev_speed))
-                            prev_speed = speed
-                except Exception as exc:
-                    raise RuntimeError(f'{_RF_PREFIX} Δz diagnostic failed; strict mode refuses to skip it: {exc}') from exc
-
-            # Cheap path-quality check: compare every cached z_sigma to the linear RF bridge.
-            if (
-                torch.is_tensor(ref_clean)
-                and torch.is_tensor(eps)
-                and tuple(t.shape) == tuple(ref_clean.shape)
-                and tuple(t.shape) == tuple(eps.shape)
-            ):
-                try:
-                    ref_f, eps_f = _ref_eps_like(t)
-                    sigma_f = max(0.0, min(1.0, float(k)))
-                    target = ((1.0 - sigma_f) * ref_f + sigma_f * eps_f).to(device=x.device)
-
-                    diff = x - target
-                    linear_mae_values.append(float(diff.abs().mean().item()))
-                    linear_rmse_values.append(float(diff.pow(2).mean().sqrt().item()))
-
-                    flat_x = x.flatten()
-                    flat_t = target.flatten()
-                    denom = flat_x.norm() * flat_t.norm()
-                    if float(denom.item()) > 1e-12:
-                        linear_cos_values.append(float(torch.dot(flat_x, flat_t).div(denom).item()))
-
-                    dims = tuple(range(1, x.ndim))
-                    if dims:
-                        x_mean = x.mean(dim=dims)
-                        t_mean = target.mean(dim=dims)
-                        mean_drift_values.append(float((x_mean - t_mean).abs().mean().item()))
-
-                        x_std = x.std(dim=dims, unbiased=False)
-                        t_std = target.std(dim=dims, unbiased=False).clamp_min(1e-12)
-                        std_ratio_drift_values.append(float((x_std / t_std - 1.0).abs().mean().item()))
-                except Exception as exc:
-                    raise RuntimeError(f'{_RF_PREFIX} linear-path diagnostic failed; strict mode refuses to skip it: {exc}') from exc
-
-        prev_tensor = t if torch.is_tensor(t) else None
-        prev_sigma = float(k)
-
-    first = cache.get(keys[0])
-    final = cache.get(keys[-1])
-    first_stats = _rf_tensor_stats(first)
-    final_stats = _rf_tensor_stats(final)
-    eps_stats = _rf_tensor_stats(eps)
-    ref_stats = _rf_tensor_stats(ref_clean)
-
-    final_std_for_tail = final_stats.get('std')
-    final_max_abs_for_tail = final_stats.get('max_abs')
-    if (
-        final_std_for_tail is not None
-        and final_max_abs_for_tail is not None
-        and float(final_std_for_tail) > 1e-12
-    ):
-        tail_ratio_final = float(final_max_abs_for_tail) / float(final_std_for_tail)
-    else:
-        tail_ratio_final = None
-
-    summary.update({
-        'bad_sigma_keys': bad_keys[:16],
-        'std_min': min(stds) if stds else None,
-        'std_max': max(stds) if stds else None,
-        'max_abs_max': max(max_abs_values) if max_abs_values else None,
-        'tail_ratio_final': tail_ratio_final,
-        'tail_ratio_max': max(tail_ratio_values) if tail_ratio_values else None,
-
-        'dz_mean': _rf_mean_or_none(dz_values),
-        'dz_max': max(dz_values) if dz_values else None,
-        'path_speed_mean': _rf_mean_or_none(path_speed_values),
-        'path_speed_max': max(path_speed_values) if path_speed_values else None,
-        'path_roughness_mean': _rf_mean_or_none(path_roughness_values),
-        'path_roughness_max': max(path_roughness_values) if path_roughness_values else None,
-
-        'path_linear_mae_mean': _rf_mean_or_none(linear_mae_values),
-        'path_linear_mae_max': max(linear_mae_values) if linear_mae_values else None,
-        'path_linear_rmse_mean': _rf_mean_or_none(linear_rmse_values),
-        'path_linear_rmse_max': max(linear_rmse_values) if linear_rmse_values else None,
-        'path_linear_cos_mean': _rf_mean_or_none(linear_cos_values),
-        'path_linear_cos_min': min(linear_cos_values) if linear_cos_values else None,
-        'path_mean_drift_mean': _rf_mean_or_none(mean_drift_values),
-        'path_mean_drift_max': max(mean_drift_values) if mean_drift_values else None,
-        'path_std_ratio_drift_mean': _rf_mean_or_none(std_ratio_drift_values),
-        'path_std_ratio_drift_max': max(std_ratio_drift_values) if std_ratio_drift_values else None,
-
-        'ref_std': ref_stats.get('std'),
-        'eps_std': eps_stats.get('std'),
-        'first_std': first_stats.get('std'),
-        'final_std': final_stats.get('std'),
-        'final_mean': final_stats.get('mean'),
-        'final_min': final_stats.get('min'),
-        'final_max': final_stats.get('max'),
-        'final_max_abs': final_stats.get('max_abs'),
-        'first_vs_ref_mae': _rf_tensor_mae(first, ref_clean),
-        'final_vs_eps_mae': _rf_tensor_mae(final, eps),
-        'final_vs_eps_rmse': _rf_tensor_rmse(final, eps),
-        'final_vs_eps_cosine': _rf_tensor_cosine(final, eps),
-    })
-
-    try:
-        eps_std = summary.get('eps_std')
-        final_std = summary.get('final_std')
-        if eps_std is not None and float(eps_std) > 1e-12 and final_std is not None:
-            summary['final_eps_std_ratio'] = float(final_std) / float(eps_std)
-        else:
-            summary['final_eps_std_ratio'] = None
-    except Exception as exc:
-        raise RuntimeError(f'{_RF_PREFIX} final/eps std-ratio diagnostic failed; strict mode refuses to hide it: {exc}') from exc
-
-    if bad_keys:
-        summary['warnings'].append('nonfinite_values')
-    if summary.get('first_vs_ref_mae') is not None and float(summary['first_vs_ref_mae']) > 1e-4:
-        summary['warnings'].append('cache_sigma0_not_reference')
-
-    speed_mean = summary.get('path_speed_mean')
-    speed_max = summary.get('path_speed_max')
-    if speed_mean is not None and speed_max is not None and float(speed_mean) > 1e-12:
-        if float(speed_max) > float(speed_mean) * 5.0:
-            summary['warnings'].append('path_speed_spike')
-
-    tail_max = summary.get('tail_ratio_max')
-    if tail_max is not None and float(tail_max) > 12.0:
-        summary['warnings'].append('heavy_tail_path')
-
-    summary['level'] = _rf_diagnostic_level(summary)
-    return summary
-
-def _rf_print_stability_summary(summary: Dict[str, Any]) -> None:
-    level = summary.get('level', 'WARN')
-    print(f'{_RF_PREFIX}   RF numerical sanity: {level}')
-    print(
-        f'{_RF_PREFIX}     cache_items={summary.get("cache_items")}  '
-        f'sigmas={summary.get("sigmas")}  '
-        f'first_sigma={_rf_scalar_fmt(summary.get("first_sigma"))}  '
-        f'last_sigma={_rf_scalar_fmt(summary.get("last_sigma"))}  '
-        f'finite_all={summary.get("finite_all")}'
-    )
-    print(
-        f'{_RF_PREFIX}     std: ref={_rf_scalar_fmt(summary.get("ref_std"))}  '
-        f'first={_rf_scalar_fmt(summary.get("first_std"))}  '
-        f'final={_rf_scalar_fmt(summary.get("final_std"))}  '
-        f'eps={_rf_scalar_fmt(summary.get("eps_std"))}  '
-        f'final/eps={_rf_scalar_fmt(summary.get("final_eps_std_ratio"))}  '
-        f'range=[{_rf_scalar_fmt(summary.get("std_min"))}, {_rf_scalar_fmt(summary.get("std_max"))}]'
-    )
-    print(
-        f'{_RF_PREFIX}     final: mean={_rf_scalar_fmt(summary.get("final_mean"))}  '
-        f'min={_rf_scalar_fmt(summary.get("final_min"))}  '
-        f'max={_rf_scalar_fmt(summary.get("final_max"))}  '
-        f'max_abs={_rf_scalar_fmt(summary.get("final_max_abs"))}  '
-        f'max_abs_over_path={_rf_scalar_fmt(summary.get("max_abs_max"))}'
-    )
-    print(
-        f'{_RF_PREFIX}     deltas: mean|Δz|={_rf_scalar_fmt(summary.get("dz_mean"))}  '
-        f'max|Δz|={_rf_scalar_fmt(summary.get("dz_max"))}  '
-        f'first_vs_ref_mae={_rf_scalar_fmt(summary.get("first_vs_ref_mae"))}  '
-        f'final_vs_eps_mae={_rf_scalar_fmt(summary.get("final_vs_eps_mae"))}  '
-        f'final_vs_eps_rmse={_rf_scalar_fmt(summary.get("final_vs_eps_rmse"))}  '
-        f'final_vs_eps_cos={_rf_scalar_fmt(summary.get("final_vs_eps_cosine"))}'
-    )
-    print(
-        f'{_RF_PREFIX}     path speed: mean|Δz|/Δσ={_rf_scalar_fmt(summary.get("path_speed_mean"))}  '
-        f'max|Δz|/Δσ={_rf_scalar_fmt(summary.get("path_speed_max"))}  '
-        f'rough_mean={_rf_scalar_fmt(summary.get("path_roughness_mean"))}  '
-        f'rough_max={_rf_scalar_fmt(summary.get("path_roughness_max"))}'
-    )
-    print(
-        f'{_RF_PREFIX}     linear bridge: mae_mean={_rf_scalar_fmt(summary.get("path_linear_mae_mean"))}  '
-        f'mae_max={_rf_scalar_fmt(summary.get("path_linear_mae_max"))}  '
-        f'rmse_mean={_rf_scalar_fmt(summary.get("path_linear_rmse_mean"))}  '
-        f'cos_mean={_rf_scalar_fmt(summary.get("path_linear_cos_mean"))}  '
-        f'cos_min={_rf_scalar_fmt(summary.get("path_linear_cos_min"))}'
-    )
-    print(
-        f'{_RF_PREFIX}     drift/tails: mean_drift={_rf_scalar_fmt(summary.get("path_mean_drift_mean"))}  '
-        f'mean_drift_max={_rf_scalar_fmt(summary.get("path_mean_drift_max"))}  '
-        f'std_ratio_drift={_rf_scalar_fmt(summary.get("path_std_ratio_drift_mean"))}  '
-        f'std_ratio_drift_max={_rf_scalar_fmt(summary.get("path_std_ratio_drift_max"))}  '
-        f'tail_ratio_final={_rf_scalar_fmt(summary.get("tail_ratio_final"))}  '
-        f'tail_ratio_max={_rf_scalar_fmt(summary.get("tail_ratio_max"))}'
-    )
-    warnings = summary.get('warnings') or []
-    if warnings:
-        print(f'{_RF_PREFIX}     warnings={warnings} bad_sigma_keys={summary.get("bad_sigma_keys", [])}')
-    if level != 'PASS':
-        print(
-            f'{_RF_PREFIX}   ⚠ RF numerical sanity did not PASS. This is a diagnostic flag only; '
-            f'it means inspect the printed stats and the generated image before trusting the run.'
-        )
-    else:
-        print(
-            f'{_RF_PREFIX}   RF numerical sanity PASS only means no obvious numeric collapse/divergence; '
-            f'it does not prove visual/semantic quality.'
-        )
 
 def _rf_model_identity(model_patcher: Any) -> Dict[str, Any]:
     """Best-effort model identity diagnostics; never used for math decisions."""
@@ -731,24 +382,6 @@ def _rf_print_sampler_capture(verbose_flag: Any, found: Any, run_count: Any) -> 
     )
 
 
-def _rf_print_build_requested(
-    verbose_flag: Any,
-    sampler_sigmas: Any,
-    target_b: int,
-    rf_cond_mode: str,
-    cache_key: str,
-    rf_ref_clean: Any,
-    rf_kwargs: Any,
-) -> None:
-    if not _coerce_bool(verbose_flag):
-        return
-    print(f'{_RF_PREFIX}   RF build requested from RFInversion wrapper')
-    print(f'{_RF_PREFIX}   {_rf_sequence_summary("sampler_sigmas", sampler_sigmas)}')
-    print(f'{_RF_PREFIX}   target_b={target_b} cond_mode={rf_cond_mode} cache_key={str(cache_key)[:12]}')
-    print(f'{_RF_PREFIX}   rf_ref_clean: {_rf_tensor_summary("rf_ref_clean", rf_ref_clean)}')
-    print(f'{_RF_PREFIX}   rf_kwargs summary: {_rf_brief_obj(rf_kwargs)}')
-
-
 def _rf_print_persistent_cache_hit(verbose_flag: Any, cache_key: str, built_cache: Any) -> None:
     if _coerce_bool(verbose_flag):
         print(f'{_RF_PREFIX}   RF persistent cache HIT key={str(cache_key)[:12]} cache_items={len(built_cache)}')
@@ -757,22 +390,6 @@ def _rf_print_persistent_cache_hit(verbose_flag: Any, cache_key: str, built_cach
 def _rf_print_persistent_cache_miss(verbose_flag: Any, cache_key: str) -> None:
     if _coerce_bool(verbose_flag):
         print(f'{_RF_PREFIX}   RF persistent cache MISS key={str(cache_key)[:12]} → building now')
-
-
-def _rf_print_build_complete(
-    verbose_flag: Any,
-    built_cache: Any,
-    sorted_sigmas: Any,
-    eps: Any,
-    rf_sanity: Dict[str, Any],
-) -> None:
-    if not _coerce_bool(verbose_flag):
-        return
-    print(
-        f'{_RF_PREFIX}   RF build complete: cache_items={len(built_cache)} '
-        f'built_sigmas={len(sorted_sigmas)} eps={_rf_tensor_summary("eps", eps)}'
-    )
-    _rf_print_stability_summary(rf_sanity)
 
 
 def _rf_print_direct_fallback(verbose_flag: Any, sigma: float) -> None:
@@ -812,7 +429,6 @@ def _rf_print_prepared(
     print(f'{_RF_PREFIX}   diagnostics   : verbose=True prints per-call/cache/conditioning details')
     _rf_print_model_identity(f'{_RF_PREFIX}   RFInversion', model_info)
     print(f'{_RF_PREFIX} ═══════════════════════════════════════\n')
-
 
 
 def _untwist_format_scale_value(value: Any) -> str:
@@ -1008,12 +624,6 @@ __all__ = [
     '_rf_brief_obj',
     '_rf_tensor_stats',
     '_rf_scalar_fmt',
-    '_rf_tensor_mae',
-    '_rf_tensor_rmse',
-    '_rf_tensor_cosine',
-    '_rf_diagnostic_level',
-    '_rf_stability_summary',
-    '_rf_print_stability_summary',
     '_rf_model_identity',
     '_rf_print_model_identity',
     '_rf_step_iterator',
@@ -1022,10 +632,8 @@ __all__ = [
     '_normalize_sigma_float',
     '_coerce_sigma_sequence',
     '_rf_print_sampler_capture',
-    '_rf_print_build_requested',
     '_rf_print_persistent_cache_hit',
     '_rf_print_persistent_cache_miss',
-    '_rf_print_build_complete',
     '_rf_print_direct_fallback',
     '_rf_print_traceback',
     '_rf_print_prepared',

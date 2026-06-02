@@ -1598,13 +1598,6 @@ class UntwistingRoPE:
         stats.rf_prefix = vp._RF_PREFIX
         debug_store = _rf_new_debug_store()
 
-        rf_mode = str(rf_cfg.get('rf_mode', 'rf_gamma_rk2'))
-        gamma = float(rf_cfg.get('gamma', 0.5))
-        gamma_curve = float(rf_cfg.get('gamma_curve', 2.0))
-        norm_strength = float(rf_cfg.get('norm_strength', 1.0))
-        pmi_alpha = float(rf_cfg.get('pmi_alpha', 0.4))
-        seed = int(rf_cfg.get('seed', 42))
-
         ext_cfg = unofficial_extensions if isinstance(unofficial_extensions, dict) else {}
         cosine_gated_v_injection = _coerce_strength01(ext_cfg.get('cosine_gated_v_injection', 0.0))
         variance_gated_v_adain = _coerce_strength01(ext_cfg.get('variance_gated_v_adain', 0.0))
@@ -1646,12 +1639,7 @@ class UntwistingRoPE:
         )
         vp._vprint(stats, f'{vp._PREFIX} RF latent connected: {rf_active}  source={rf_source}')
         if rf_active:
-            vp._vprint(stats,
-                f'{vp._PREFIX} RF trajectory: mode={rf_mode}  gamma={gamma}  '
-                f'gamma_curve={gamma_curve:.3f}  '
-                f'norm_strength={norm_strength}  pmi_alpha={pmi_alpha}  '
-                f'seed={seed}'
-            )
+            vp._vprint(stats, f'{vp._PREFIX} RF trajectory: {_rf_format_trajectory_config(rf_cfg)}')
             vp._vprint(stats, f'{vp._PREFIX} RF schedule: captured from sampler at runtime; no SIGMAS input')
 
         model_clone = model.clone()
@@ -1776,79 +1764,30 @@ class UntwistingRoPE:
                         rf_cond_mode = _append_conditioning_status(rf_cond_mode, adapter_ref_status)
                         rf_ref_clean = _repeat_to_batch(ref_clean, target_b)
                         sampler_sigmas = list(rf_state['sampler_sigmas'])
-                        cache_key = _make_rf_persistent_key(
-                            ref_clean=ref_clean_cpu.detach().to(device='cpu'),
+                        built_cache, eps, sorted_sigmas, cache_key, persistent_hit = _rf_ensure_trajectory_cache(
+                            rf_inversion=rf_inversion,
+                            rf_state=rf_state,
+                            rf_cfg=rf_cfg,
+                            ref_clean_cpu=ref_clean_cpu,
+                            ref_clean_for_build=rf_ref_clean,
                             ref_conditioning=ref_conditioning,
                             sampler_sigmas=sampler_sigmas,
                             target_b=target_b,
-                            rf_mode=rf_mode,
-                            gamma=gamma,
-                            gamma_curve=gamma_curve,
-                            norm_strength=norm_strength,
-                            cond_mode=rf_cond_mode,
-                            pmi_alpha=pmi_alpha,
+                            rf_cond_mode=rf_cond_mode,
+                            apply_model_fn=apply_model,
+                            base_model_kwargs=rf_kwargs,
+                            device=input_x.device,
+                            dtype=input_x.dtype,
+                            stats=stats,
+                            preview_callback_factory=lambda: _rf_make_preview_callback(model_clone, max(1, len(sampler_sigmas) - 1)),
+                            debug_store=debug_store,
+                            parameterization=stats.parameterization,
                         )
-                        cached_entry = _RF_PERSISTENT_TRAJECTORY_CACHE.get(cache_key)
-                        if cached_entry is not None:
-                            built_cache = _cache_to_device(cached_entry['cache'], input_x.device, input_x.dtype)
-                            eps = cached_entry['eps'].to(device=input_x.device, dtype=input_x.dtype)
-                            sorted_sigmas = list(cached_entry['built_sigmas'])
-                            vp._rf_vprint(stats, f'{vp._rf_prefix(stats)} RFInversion persistent cache HIT: key={cache_key[:12]}  cache={len(built_cache)}')
-                            ref_mode = 'RF sampler-sigma trajectory (persistent-cache hit)'
-                            rf_state['persistent_cache_hit'] = True
-                        else:
-                            vp._rf_vprint(stats, f'{vp._rf_prefix(stats)} RFInversion persistent cache MISS: key={cache_key[:12]}  building trajectory')
-                            preview_callback = rf_state.get('preview_callback', None)
-                            if preview_callback is None:
-                                preview_callback = _rf_make_preview_callback(model_clone, max(1, len(sampler_sigmas) - 1))
-                                rf_state['preview_callback'] = preview_callback
-                            built_cache, eps, sorted_sigmas = _rf_build_cache_from_sampler_sigmas(
-                                ref_clean=rf_ref_clean,
-                                sampler_sigmas=sampler_sigmas,
-                                apply_model_fn=apply_model,
-                                base_model_kwargs=rf_kwargs,
-                                gamma=gamma,
-                                seed=seed,
-                                stats=stats,
-                                eps=rf_state['eps'].to(device=input_x.device, dtype=input_x.dtype)
-                                    if torch.is_tensor(rf_state.get('eps', None)) else None,
-                                rf_mode=rf_mode,
-                                gamma_curve=gamma_curve,
-                                    norm_strength=norm_strength,
-                                pmi_alpha=pmi_alpha,
-                                preview_callback=preview_callback,
-                            )
-                            _put_persistent_rf_cache(cache_key, {
-                                'cache': _cache_to_cpu(built_cache),
-                                'eps': eps.detach().to(device='cpu').clone(),
-                                'built_sigmas': list(sorted_sigmas),
-                            })
-                            ref_mode = 'RF sampler-sigma trajectory (built)'
-                            rf_state['persistent_cache_hit'] = False
-
-                        rf_state['cache'] = built_cache
-                        rf_state['eps'] = eps.detach().clone()
-                        rf_state['schedule_sorted'] = sorted_sigmas
-                        rf_state['schedule_built'] = True
-                        rf_state['persistent_cache_key'] = cache_key
+                        ref_mode = 'RF sampler-sigma trajectory (persistent-cache hit)' if persistent_hit else 'RF sampler-sigma trajectory (built)'
                         stats.rf_sigma_cache = rf_state['cache']
                         stats.rf_eps = rf_state['eps']
                         stats.rf_schedule_built = True
                         stats.rf_step_count = max(0, len(sorted_sigmas) - 1)
-
-                        if isinstance(rf_inversion, dict):
-                            rf_inversion['untwist_rf_cache'] = _cache_to_cpu(built_cache)
-                            rf_inversion['untwist_rf_eps'] = eps.detach().to(device='cpu').clone()
-                            rf_inversion['untwist_rf_sigmas'] = list(sorted_sigmas)
-                            rf_inversion['untwist_rf_state'] = rf_state
-
-                        debug_store['cache'] = rf_state['cache']
-                        debug_store['sampler_sigmas'] = list(rf_state.get('sampler_sigmas') or [])
-                        debug_store['built_sigmas'] = list(sorted_sigmas)
-                        debug_store['run_count'] = int(rf_state.get('run_count', 0))
-                        debug_store['persistent_cache_key'] = cache_key
-                        debug_store['persistent_cache_hit'] = bool(rf_state.get('persistent_cache_hit', False))
-                        debug_store['parameterization'] = stats.parameterization
                     elif rf_state.get('schedule_built', False):
                         ref_mode = 'RF sampler-sigma trajectory (cached)'
                     else:
@@ -1954,15 +1893,9 @@ class UntwistingRoPE:
 from .rf_inversion import (
     RFInversion,
     _RF_LAST_DEBUG_STORE,
-    _RF_PERSISTENT_TRAJECTORY_CACHE,
     _append_conditioning_status,
-    _cache_to_cpu,
-    _cache_to_device,
-    _coerce_norm_strength,
-    _make_rf_persistent_key,
-    _normalize_rf_mode_and_gamma_curve,
-    _put_persistent_rf_cache,
-    _rf_build_cache_from_sampler_sigmas,
+    _rf_ensure_trajectory_cache,
+    _rf_format_trajectory_config,
     _rf_latent_get_config,
     _rf_make_preview_callback,
     _rf_new_debug_store,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import inspect
 import math
 import hashlib
 import time
@@ -77,17 +78,85 @@ def _hash_any(obj: Any, h: Optional["hashlib._Hash"] = None, depth: int = 0) -> 
         h.update(repr(obj).encode('utf-8', errors='ignore'))
     return h.hexdigest()
 
+_RF_CONFIG_NON_TRAJECTORY_KEYS = {
+    'verbose',
+    'apply_model_output',
+    'model_info',
+}
+
+_RF_BUILD_FIXED_KWARGS = {
+    'ref_clean',
+    'sampler_sigmas',
+    'apply_model_fn',
+    'base_model_kwargs',
+    'stats',
+    'eps',
+    'preview_callback',
+}
+
+def _coerce_unit_interval(value: Any, default: float = 0.0) -> float:
+    try:
+        v = float(value)
+    except Exception:
+        v = float(default)
+    if not math.isfinite(v):
+        v = float(default)
+    return max(0.0, min(1.0, v))
+
+def _rf_trajectory_config_for_cache(rf_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Return the RF parameters that affect the trajectory/cache.
+
+    This intentionally lives in rf_inversion.py. Adding a new RF trajectory
+    parameter should only require placing it in untwist_rf_config and adding it
+    to _rf_build_cache_from_sampler_sigmas when the builder needs it. The cache
+    key will include it automatically unless the key is explicitly marked as
+    non-trajectory metadata here.
+    """
+    cfg = dict(rf_cfg or {})
+    for key in list(cfg.keys()):
+        if key in _RF_CONFIG_NON_TRAJECTORY_KEYS or str(key).startswith('_'):
+            cfg.pop(key, None)
+
+    mode, gamma_curve = _normalize_rf_mode_and_gamma_curve(
+        cfg.get('rf_mode', 'rf_gamma'),
+        cfg.get('gamma_curve', 0.0),
+    )
+    cfg['rf_mode'] = mode
+    cfg['gamma_curve'] = float(gamma_curve)
+    cfg['gamma'] = float(cfg.get('gamma', 0.5))
+    cfg['norm_strength'] = _coerce_norm_strength(cfg.get('norm_strength', 0.0))
+    cfg['pmi_alpha'] = _coerce_unit_interval(cfg.get('pmi_alpha', 0.4), 0.4)
+    cfg['seed'] = int(cfg.get('seed', 42))
+    return cfg
+
+def _rf_build_kwargs_from_config(rf_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Extract only RF config values accepted by the trajectory builder.
+
+    This is signature-driven so callers outside rf_inversion.py do not need to
+    change when a new RF parameter is added to the builder.
+    """
+    cfg = _rf_trajectory_config_for_cache(rf_cfg)
+    params = inspect.signature(_rf_build_cache_from_sampler_sigmas).parameters
+    return {
+        name: cfg[name]
+        for name in params.keys()
+        if name not in _RF_BUILD_FIXED_KWARGS and name in cfg
+    }
+
+def _rf_format_trajectory_config(rf_cfg: Optional[Dict[str, Any]]) -> str:
+    cfg = _rf_trajectory_config_for_cache(rf_cfg)
+    return '  '.join(f'{k}={cfg[k]}' for k in sorted(cfg.keys()))
+
 def _make_rf_persistent_key(
     ref_clean: torch.Tensor,
     ref_conditioning: Any,
     sampler_sigmas: List[float],
     target_b: int,
-    rf_mode: str,
-    gamma: float,
-    gamma_curve: float,
-    norm_strength: float,
     cond_mode: str,
-    pmi_alpha: float = 0.4,
+    rf_config: Optional[Dict[str, Any]] = None,
+    **legacy_rf_params: Any,
 ) -> str:
     h = hashlib.sha1()
 
@@ -98,13 +167,11 @@ def _make_rf_persistent_key(
 
     h.update(str([round(float(s), 8) for s in sampler_sigmas]).encode('utf-8'))
     h.update(str(int(target_b)).encode('utf-8'))
-
-    h.update(str(rf_mode).encode('utf-8'))
-    h.update(f'{float(gamma):.8f}'.encode('utf-8'))
-    h.update(f'{float(gamma_curve):.8f}'.encode('utf-8'))
-    h.update(f'{float(norm_strength):.8f}'.encode('utf-8'))
     h.update(str(cond_mode).encode('utf-8'))
-    h.update(f'{float(pmi_alpha):.8f}'.encode('utf-8'))
+
+    cfg = dict(rf_config or {})
+    cfg.update({k: v for k, v in legacy_rf_params.items() if v is not None})
+    h.update(_hash_any(_rf_trajectory_config_for_cache(cfg)).encode('utf-8'))
 
     return h.hexdigest()
 
@@ -127,6 +194,105 @@ def _put_persistent_rf_cache(key: str, entry: Dict[str, Any]) -> None:
     while len(_RF_PERSISTENT_TRAJECTORY_CACHE) > _RF_PERSISTENT_CACHE_MAX_ITEMS:
         oldest = next(iter(_RF_PERSISTENT_TRAJECTORY_CACHE.keys()))
         _RF_PERSISTENT_TRAJECTORY_CACHE.pop(oldest, None)
+
+def _rf_ensure_trajectory_cache(
+    *,
+    rf_inversion: Optional[Dict[str, Any]],
+    rf_state: Dict[str, Any],
+    rf_cfg: Dict[str, Any],
+    ref_clean_cpu: torch.Tensor,
+    ref_clean_for_build: torch.Tensor,
+    ref_conditioning: Any,
+    sampler_sigmas: List[float],
+    target_b: int,
+    rf_cond_mode: str,
+    apply_model_fn: Callable,
+    base_model_kwargs: Dict[str, Any],
+    device: torch.device,
+    dtype: torch.dtype,
+    stats: Optional[vp._RuntimeStats],
+    preview_callback_factory: Optional[Callable[[], Optional[Callable]]] = None,
+    verbose_flag: Optional[bool] = None,
+    debug_store: Optional[Dict[str, Any]] = None,
+    parameterization: Optional[str] = None,
+) -> Tuple[Dict[float, torch.Tensor], torch.Tensor, List[float], str, bool]:
+    """
+    Own persistent RF trajectory cache lookup/build/update in rf_inversion.py.
+
+    UntwistingRoPE should call this instead of manually constructing keys,
+    checking _RF_PERSISTENT_TRAJECTORY_CACHE, or listing RF trajectory params.
+    """
+    sampler_sigmas = list(sampler_sigmas)
+    cache_key = _make_rf_persistent_key(
+        ref_clean=ref_clean_cpu.detach().to(device='cpu'),
+        ref_conditioning=ref_conditioning,
+        sampler_sigmas=sampler_sigmas,
+        target_b=target_b,
+        cond_mode=rf_cond_mode,
+        rf_config=rf_cfg,
+    )
+
+    if verbose_flag is None:
+        verbose_flag = vp._coerce_bool(getattr(stats, 'rf_verbose', False)) if stats else False
+
+
+    cached_entry = _RF_PERSISTENT_TRAJECTORY_CACHE.get(cache_key)
+    if cached_entry is not None:
+        built_cache = _cache_to_device(cached_entry['cache'], device, dtype)
+        eps = cached_entry['eps'].to(device=device, dtype=dtype)
+        sorted_sigmas = list(cached_entry['built_sigmas'])
+        persistent_hit = True
+        vp._rf_print_persistent_cache_hit(verbose_flag, cache_key, built_cache)
+    else:
+        persistent_hit = False
+        preview_callback = rf_state.get('preview_callback', None)
+        if preview_callback is None and preview_callback_factory is not None:
+            preview_callback = preview_callback_factory()
+            rf_state['preview_callback'] = preview_callback
+        vp._rf_print_persistent_cache_miss(verbose_flag, cache_key)
+        built_cache, eps, sorted_sigmas = _rf_build_cache_from_sampler_sigmas(
+            ref_clean=ref_clean_for_build,
+            sampler_sigmas=sampler_sigmas,
+            apply_model_fn=apply_model_fn,
+            base_model_kwargs=base_model_kwargs,
+            stats=stats,
+            eps=rf_state['eps'].to(device=device, dtype=dtype)
+                if torch.is_tensor(rf_state.get('eps', None)) else None,
+            preview_callback=preview_callback,
+            **_rf_build_kwargs_from_config(rf_cfg),
+        )
+        _put_persistent_rf_cache(cache_key, {
+            'cache': _cache_to_cpu(built_cache),
+            'eps': eps.detach().to(device='cpu').clone(),
+            'built_sigmas': list(sorted_sigmas),
+            'rf_config': _rf_trajectory_config_for_cache(rf_cfg),
+        })
+
+    rf_state['cache'] = built_cache
+    rf_state['eps'] = eps.detach().clone()
+    rf_state['schedule_sorted'] = list(sorted_sigmas)
+    rf_state['schedule_built'] = True
+    rf_state['persistent_cache_key'] = cache_key
+    rf_state['persistent_cache_hit'] = bool(persistent_hit)
+
+    if isinstance(rf_inversion, dict):
+        rf_inversion['untwist_rf_cache'] = _cache_to_cpu(built_cache)
+        rf_inversion['untwist_rf_eps'] = eps.detach().to(device='cpu').clone()
+        rf_inversion['untwist_rf_sigmas'] = list(sorted_sigmas)
+        rf_inversion['untwist_rf_state'] = rf_state
+
+    if debug_store is not None:
+        debug_store['cache'] = rf_state['cache']
+        debug_store['sampler_sigmas'] = sampler_sigmas
+        debug_store['built_sigmas'] = list(sorted_sigmas)
+        debug_store['run_count'] = int(rf_state.get('run_count', 0))
+        debug_store['persistent_cache_key'] = cache_key
+        debug_store['persistent_cache_hit'] = bool(persistent_hit)
+        if parameterization is not None:
+            debug_store['parameterization'] = parameterization
+
+
+    return built_cache, eps, list(sorted_sigmas), cache_key, bool(persistent_hit)
 # ═══════════════════════════════════════════════════════════════════════════════
 # Parameterization auto-detection
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1021,85 +1187,28 @@ class RFInversion:
                     state['last_cond_mode'] = rf_cond_mode
                     debug_store['last_cond_mode'] = rf_cond_mode
 
-                    cache_key = _make_rf_persistent_key(
-                        ref_clean=ref_clean.detach().to(device='cpu'),
+                    built_cache, eps, sorted_sigmas, cache_key, _persistent_hit = _rf_ensure_trajectory_cache(
+                        rf_inversion=rf_latent,
+                        rf_state=state,
+                        rf_cfg=cfg,
+                        ref_clean_cpu=ref_clean,
+                        ref_clean_for_build=rf_ref_clean,
                         ref_conditioning=ref_conditioning,
                         sampler_sigmas=list(sampler_sigmas),
                         target_b=target_b,
-                        rf_mode=rf_mode,
-                        gamma=gamma,
-                        gamma_curve=gamma_curve,
-                        norm_strength=norm_strength,
-                        cond_mode=rf_cond_mode,
-                        pmi_alpha=pmi_alpha,
+                        rf_cond_mode=rf_cond_mode,
+                        apply_model_fn=apply_model,
+                        base_model_kwargs=rf_kwargs,
+                        device=input_x.device,
+                        dtype=input_x.dtype,
+                        stats=rf_runtime_stats,
+                        preview_callback_factory=lambda: _rf_make_preview_callback(model_clone, max(1, len(list(sampler_sigmas)) - 1)),
+                        verbose_flag=verbose_flag,
+                        debug_store=debug_store,
+                        parameterization=detected_param,
                     )
-
-                    vp._rf_print_build_requested(
-                        verbose_flag, sampler_sigmas, target_b, rf_cond_mode,
-                        cache_key, rf_ref_clean, rf_kwargs,
-                    )
-
-                    cached_entry = _RF_PERSISTENT_TRAJECTORY_CACHE.get(cache_key)
-                    if cached_entry is not None:
-                        built_cache = _cache_to_device(cached_entry['cache'], input_x.device, input_x.dtype)
-                        eps = cached_entry['eps'].to(device=input_x.device, dtype=input_x.dtype)
-                        sorted_sigmas = list(cached_entry['built_sigmas'])
-                        state['persistent_cache_hit'] = True
-                        vp._rf_print_persistent_cache_hit(verbose_flag, cache_key, built_cache)
-                    else:
-                        state['persistent_cache_hit'] = False
-                        preview_callback = state.get('preview_callback', None)
-                        if preview_callback is None:
-                            preview_callback = _rf_make_preview_callback(model_clone, max(1, len(list(sampler_sigmas)) - 1))
-                            state['preview_callback'] = preview_callback
-                        vp._rf_print_persistent_cache_miss(verbose_flag, cache_key)
-                        built_cache, eps, sorted_sigmas = _rf_build_cache_from_sampler_sigmas(
-                            ref_clean=rf_ref_clean,
-                            sampler_sigmas=list(sampler_sigmas),
-                            apply_model_fn=apply_model,
-                            base_model_kwargs=rf_kwargs,
-                            gamma=gamma,
-                            seed=42,
-                            stats=rf_runtime_stats,
-                            eps=state['eps'].to(device=input_x.device, dtype=input_x.dtype)
-                                if torch.is_tensor(state.get('eps', None)) else None,
-                            rf_mode=rf_mode,
-                            gamma_curve=gamma_curve,
-                            norm_strength=norm_strength,
-                            pmi_alpha=pmi_alpha,
-                            preview_callback=preview_callback,
-                        )
-                        _put_persistent_rf_cache(cache_key, {
-                            'cache': _cache_to_cpu(built_cache),
-                            'eps': eps.detach().to(device='cpu').clone(),
-                            'built_sigmas': list(sorted_sigmas),
-                        })
-
-                    state['cache'] = built_cache
-                    state['eps'] = eps.detach().clone()
-                    state['schedule_sorted'] = list(sorted_sigmas)
-                    state['schedule_built'] = True
-                    state['persistent_cache_key'] = cache_key
-                    rf_latent['untwist_rf_cache'] = _cache_to_cpu(built_cache)
-                    rf_latent['untwist_rf_eps'] = eps.detach().to(device='cpu').clone()
-                    rf_latent['untwist_rf_sigmas'] = list(sorted_sigmas)
-                    rf_latent['untwist_rf_state'] = state
-
-                    debug_store['cache'] = state['cache']
-                    debug_store['sampler_sigmas'] = list(sampler_sigmas)
-                    debug_store['built_sigmas'] = list(sorted_sigmas)
-                    debug_store['persistent_cache_key'] = cache_key
-                    debug_store['persistent_cache_hit'] = bool(state.get('persistent_cache_hit', False))
-                    debug_store['parameterization'] = detected_param
                     debug_store['apply_model_output'] = cfg['apply_model_output']
                     debug_store['model_info'] = model_info
-
-                    rf_sanity = vp._rf_stability_summary(rf_ref_clean, eps, built_cache, list(sorted_sigmas))
-                    state['last_stability_summary'] = rf_sanity
-                    rf_latent['untwist_rf_stability_summary'] = rf_sanity
-                    debug_store['stability_summary'] = rf_sanity
-
-                    vp._rf_print_build_complete(verbose_flag, built_cache, sorted_sigmas, eps, rf_sanity)
 
                 elif not state.get('schedule_built', False) and sampler_sigmas is None:
                     raise RuntimeError(
