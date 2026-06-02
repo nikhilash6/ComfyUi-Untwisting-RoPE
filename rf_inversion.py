@@ -888,6 +888,46 @@ def _sigma_to_progress(timestep: torch.Tensor, sampler_sigmas: List[float]) -> f
 
     idx = min(range(len(active)), key=lambda i: abs(active[i] - sigma))
     return max(0.0, min(1.0, idx / max(1, len(active) - 1)))
+
+def _rf_record_probe_sigma(state: Dict[str, Any], debug_store: Optional[Dict[str, Any]], sigma: float) -> float:
+    """Record the exact sigma value a sampler actually passed to the model during a cheap probe pass."""
+    sigma_key = round(float(sigma), 6)
+    probe = state.setdefault('probe_sigmas', [])
+    if not isinstance(probe, list):
+        probe = []
+        state['probe_sigmas'] = probe
+    # Keep model-call order, but avoid repeated entries from chunked cond/uncond calls at the same sigma.
+    if not probe or round(float(probe[-1]), 6) != sigma_key:
+        probe.append(sigma_key)
+    state['last_probe_sigma'] = sigma_key
+    if debug_store is not None:
+        debug_store['probe_sigmas'] = list(probe)
+        debug_store['last_probe_sigma'] = sigma_key
+    return sigma_key
+
+def _rf_cache_lookup(cache: Dict[float, torch.Tensor], sigma: float, *, allow_nearest: bool = True):
+    """
+    Exact cache lookup first; optional nearest fallback for adaptive samplers whose
+    real path can differ from the zero-denoiser probe path.
+    """
+    sigma_key = round(float(sigma), 6)
+    if not isinstance(cache, dict) or not cache:
+        return None, sigma_key, 'missing'
+
+    cached = cache.get(sigma_key, None)
+    if cached is not None:
+        return cached, sigma_key, 'exact'
+
+    if not allow_nearest:
+        return None, sigma_key, 'missing'
+
+    try:
+        nearest_key = min(cache.keys(), key=lambda k: abs(float(k) - sigma_key))
+    except Exception:
+        return None, sigma_key, 'missing'
+
+    return cache.get(nearest_key, None), float(nearest_key), 'nearest'
+
 def _rf_new_debug_store() -> Dict[str, Any]:
     """Reset and return the module-level RF debug store used by RFInversion runtime."""
     debug_store: Dict[str, Any] = _RF_LAST_DEBUG_STORE
@@ -1085,12 +1125,17 @@ class RFInversion:
             'last_cond_mode': None,
             'last_cache_lookup': None,
             'last_error': None,
+            'sigma_probe_active': False,
+            'probe_sigmas': [],
+            'probe_model_calls': 0,
         }
         debug_store = _rf_new_debug_store()
         debug_store['cache'] = state['cache']
         debug_store['parameterization'] = detected_param
         debug_store['apply_model_output'] = cfg['apply_model_output']
         debug_store['model_info'] = model_info
+        debug_store['probe_sigmas'] = []
+        debug_store['probe_model_calls'] = 0
 
         # Normal LATENT output: samples stay a latent tensor; extra keys carry RF metadata.
         rf_latent: Dict[str, Any] = dict(reference_latent)
@@ -1115,7 +1160,7 @@ class RFInversion:
         def sampler_sample_wrapper(executor, model_wrap, sigmas, extra_args, callback, noise, latent_image=None, denoise_mask=None, disable_pbar=False):
             found = vp._coerce_sigma_sequence(sigmas)
             if found is not None:
-                state['sampler_sigmas'] = found
+                state['sampler_sigmas'] = list(found)
                 state['schedule_built'] = False
                 state['schedule_sorted'] = None
                 state['persistent_cache_key'] = None
@@ -1124,6 +1169,8 @@ class RFInversion:
                 state['eps'] = None
                 state['run_count'] = int(state.get('run_count', 0)) + 1
                 state['preview_callback'] = _rf_make_preview_callback(model_clone, max(1, len(found) - 1))
+                state['probe_sigmas'] = []
+                state['probe_model_calls'] = 0
 
                 rf_latent['untwist_rf_cache'] = state['cache']
                 rf_latent['untwist_rf_sigmas'] = list(found)
@@ -1131,12 +1178,50 @@ class RFInversion:
 
                 debug_store['cache'] = state['cache']
                 debug_store['sampler_sigmas'] = list(found)
+                debug_store['probe_sigmas'] = []
+                debug_store['probe_model_calls'] = 0
                 debug_store['built_sigmas'] = None
                 debug_store['run_count'] = int(state['run_count'])
                 debug_store['persistent_cache_key'] = None
                 debug_store['persistent_cache_hit'] = False
                 debug_store['parameterization'] = rf_latent.get('untwist_rf_parameterization', 'unknown')
-                vp._rf_print_sampler_capture(verbose_flag, found, state["run_count"])
+
+                # Cheap sigma preflight
+                probe_noise = noise.detach().clone() if torch.is_tensor(noise) else noise
+                probe_latent_image = latent_image.detach().clone() if torch.is_tensor(latent_image) else latent_image
+                probe_denoise_mask = denoise_mask.detach().clone() if torch.is_tensor(denoise_mask) else denoise_mask
+                probe_extra_args = extra_args.copy() if isinstance(extra_args, dict) else extra_args
+
+                state['sigma_probe_active'] = True
+                try:
+                    executor(model_wrap, sigmas, probe_extra_args, None, probe_noise, probe_latent_image, probe_denoise_mask, True)
+                finally:
+                    state['sigma_probe_active'] = False
+
+                probe_sigmas = list(state.get('probe_sigmas') or [])
+                if probe_sigmas:
+                    state['sampler_sigmas'] = probe_sigmas
+                    state['schedule_built'] = False
+                    state['schedule_sorted'] = None
+                    state['persistent_cache_key'] = None
+                    state['persistent_cache_hit'] = False
+                    state['cache'] = {0.0: ref_clean.detach().to(device='cpu').clone()}
+                    state['eps'] = None
+                    state['preview_callback'] = _rf_make_preview_callback(model_clone, max(1, len(probe_sigmas) - 1))
+
+                    rf_latent['untwist_rf_cache'] = state['cache']
+                    rf_latent['untwist_rf_sigmas'] = list(probe_sigmas)
+                    rf_latent['untwist_rf_state'] = state
+
+                    debug_store['cache'] = state['cache']
+                    debug_store['sampler_sigmas'] = list(probe_sigmas)
+                    debug_store['probe_sigmas'] = list(probe_sigmas)
+                    debug_store['built_sigmas'] = None
+                    debug_store['persistent_cache_key'] = None
+                    debug_store['persistent_cache_hit'] = False
+                    vp._rf_print_sampler_capture(verbose_flag, probe_sigmas, state["run_count"])
+                else:
+                    vp._rf_print_sampler_capture(verbose_flag, found, state["run_count"])
 
             return executor(model_wrap, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
 
@@ -1169,6 +1254,14 @@ class RFInversion:
             sigma_key = round(float(sigma), 6)
             state['last_sigma'] = sigma_key
             debug_store['last_sigma'] = sigma_key
+
+            if state.get('sigma_probe_active', False):
+                if not torch.is_tensor(input_x):
+                    raise RuntimeError('RFInversion sigma probe received a non-tensor input.')
+                state['probe_model_calls'] = int(state.get('probe_model_calls', 0)) + 1
+                debug_store['probe_model_calls'] = int(state['probe_model_calls'])
+                _rf_record_probe_sigma(state, debug_store, sigma)
+                return torch.zeros_like(input_x)
 
             try:
                 if not torch.is_tensor(input_x):
@@ -1220,14 +1313,15 @@ class RFInversion:
                     )
 
                 cache = state.get('cache') if isinstance(state.get('cache'), dict) else {}
-                cached = cache.get(sigma_key, None)
-                cache_lookup = 'exact' if cached is not None else 'missing'
+                cached, used_sigma_key, cache_lookup = _rf_cache_lookup(cache, sigma_key, allow_nearest=True)
                 if cached is None:
                     raise RuntimeError(
-                        f'RFInversion failed: no exact RF cache entry for sigma={sigma_key:.6f}.'
+                        f'RFInversion failed: no RF cache entry for sigma={sigma_key:.6f}.'
                     )
                 state['last_cache_lookup'] = cache_lookup
+                state['last_cache_key'] = float(used_sigma_key)
                 debug_store['last_cache_lookup'] = cache_lookup
+                debug_store['last_cache_key'] = float(used_sigma_key)
 
 
             except Exception as exc:

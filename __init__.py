@@ -1706,6 +1706,13 @@ class UntwistingRoPE:
             _maybe_install_untwist_attention_override(to)
 
             sigma = _sigma_from_timestep(timestep)
+
+            if rf_active and isinstance(rf_state, dict) and rf_state.get('sigma_probe_active', False):
+                rf_state['probe_model_calls'] = int(rf_state.get('probe_model_calls', 0)) + 1
+                debug_store['probe_model_calls'] = int(rf_state['probe_model_calls'])
+                _rf_record_probe_sigma(rf_state, debug_store, sigma)
+                return torch.zeros_like(input_x)
+
             progress = _sigma_to_progress(timestep, list(rf_state['sampler_sigmas']))
             target_b = int(input_x.shape[0])
 
@@ -1798,12 +1805,16 @@ class UntwistingRoPE:
                         )
 
                     cache = rf_state.get('cache') if isinstance(rf_state.get('cache'), dict) else {}
-                    cached = cache.get(sigma_key, None)
+                    cached, used_sigma_key, cache_lookup = _rf_cache_lookup(cache, sigma_key, allow_nearest=True)
                     if cached is None:
                         raise RuntimeError(
-                            f'UntwistingRoPE failed: no exact RF cache entry for sigma={sigma_key:.6f}.'
+                            f'UntwistingRoPE failed: no RF cache entry for sigma={sigma_key:.6f}.'
                         )
                     rf_cache_hit = True
+                    rf_state['last_cache_lookup'] = cache_lookup
+                    rf_state['last_cache_key'] = float(used_sigma_key)
+                    debug_store['last_cache_lookup'] = cache_lookup
+                    debug_store['last_cache_key'] = float(used_sigma_key)
 
                     ref_noisy = _repeat_to_batch(cached.to(device=input_x.device, dtype=input_x.dtype), target_b)
 
@@ -1895,7 +1906,9 @@ from .rf_inversion import (
     RFInversion,
     _RF_LAST_DEBUG_STORE,
     _append_conditioning_status,
+    _rf_cache_lookup,
     _rf_ensure_trajectory_cache,
+    _rf_record_probe_sigma,
     _rf_format_trajectory_config,
     _rf_latent_get_config,
     _rf_make_preview_callback,
