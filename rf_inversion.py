@@ -224,7 +224,6 @@ def _rf_ensure_trajectory_cache(
     if verbose_flag is None:
         verbose_flag = vp._coerce_bool(getattr(stats, 'rf_verbose', False)) if stats else False
 
-
     cached_entry = _RF_PERSISTENT_TRAJECTORY_CACHE.get(cache_key)
     if cached_entry is not None:
         built_cache = _cache_to_device(cached_entry['cache'], device, dtype)
@@ -256,6 +255,16 @@ def _rf_ensure_trajectory_cache(
             'built_sigmas': list(sorted_sigmas),
             'rf_config': _rf_trajectory_config_for_cache(rf_cfg),
         })
+        try:
+            import time
+            import tqdm
+            if hasattr(tqdm.tqdm, '_instances'):
+                now = time.time()
+                for instance in list(getattr(tqdm.tqdm, '_instances', [])):
+                    instance.start_t = now
+                    instance.last_print_t = now
+        except Exception:
+            pass
 
     rf_state['cache'] = built_cache
     rf_state['eps'] = eps.detach().clone()
@@ -280,8 +289,8 @@ def _rf_ensure_trajectory_cache(
         if parameterization is not None:
             debug_store['parameterization'] = parameterization
 
-
     return built_cache, eps, list(sorted_sigmas), cache_key, bool(persistent_hit)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Parameterization auto-detection
 # ═══════════════════════════════════════════════════════════════════════════════
