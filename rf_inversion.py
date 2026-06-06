@@ -108,15 +108,10 @@ def _coerce_unit_interval(value: Any, default: float = 0.0) -> float:
 def _rf_trajectory_config_for_cache(rf_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return the RF parameters that affect the trajectory/cache."""
     src = dict(rf_cfg or {})
-    mode, gamma_curve = _normalize_rf_mode_and_gamma_curve(
-        src.get('rf_mode', 'rf_gamma'),
-        src.get('gamma_curve', 0.0),
-    )
+    mode = str(src.get('rf_mode', 'rf_gamma') or 'rf_gamma')
     return {
         'rf_mode': mode,
-        'gamma_curve': float(gamma_curve),
         'gamma': float(src.get('gamma', 0.5)),
-        'norm_strength': _coerce_norm_strength(src.get('norm_strength', 0.0)),
         'pmi_alpha': _coerce_unit_interval(src.get('pmi_alpha', 0.4), 0.4),
         'otip_strength': _coerce_otip_strength(src.get('otip_strength', 0.0)),
         'otip_phase': _coerce_otip_phase(src.get('otip_phase', 1.0)),
@@ -459,9 +454,6 @@ def _flow_denoised_preview_from_raw_velocity(
 # RF utility helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_GAMMA_RF_MODES = {'rf_gamma', 'rf_gamma_rk2', 'fireflow', 'rf_solver_2'}
-
-
 def _rf_base_mode(mode: str) -> str:
     """Return the actual RF solver mode.
 
@@ -469,33 +461,6 @@ def _rf_base_mode(mode: str) -> str:
     solvers and set otip_strength > 0 to add OTIP transport guidance.
     """
     return str(mode or 'rf_gamma')
-
-def _coerce_gamma_curve(value: Any = 0.0) -> float:
-    """Clamp gamma_curve to the supported range."""
-    try:
-        curve = float(value)
-    except Exception as exc:
-        raise ValueError(f'Invalid gamma_curve value: {value!r}.') from exc
-    if not math.isfinite(curve):
-        raise ValueError(f'Invalid gamma_curve value: {value!r} is not finite.')
-    return max(0.0, min(8.0, curve))
-
-def _normalize_rf_mode_and_gamma_curve(
-    mode: str,
-    gamma_curve: float = 0.0,
-) -> Tuple[str, float]:
-    """Normalize the RF mode string and clamp gamma_curve."""
-    mode = str(mode or 'rf_gamma')
-    return mode, _coerce_gamma_curve(gamma_curve)
-
-def _coerce_norm_strength(norm_strength: float) -> float:
-    try:
-        strength = float(norm_strength)
-    except Exception as exc:
-        raise ValueError(f'Invalid norm_strength value: {norm_strength!r}.') from exc
-    if not math.isfinite(strength):
-        raise ValueError(f'Invalid norm_strength value: {norm_strength!r} is not finite.')
-    return max(0.0, min(1.0, strength))
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -659,36 +624,15 @@ def _rf_gamma_for_mode(
     gamma: float,
     sigma_prev: float,
     sigma_cur: float,
-    gamma_curve: float = 0.0,
 ) -> float:
-    mode, gamma_curve = _normalize_rf_mode_and_gamma_curve(mode, gamma_curve)
     base_mode = _rf_base_mode(mode)
     if base_mode == 'linear':
         return 0.0
-    if gamma_curve > 0.0 and mode in _GAMMA_RF_MODES:
-        s = max(0.0, min(1.0, 0.5 * (float(sigma_prev) + float(sigma_cur))))
-        bell = max(0.0, min(1.0, 4.0 * s * (1.0 - s)))
-        return float(gamma) * (bell ** gamma_curve)
     return float(gamma)
 
 def _rf_linear_target(ref_clean: torch.Tensor, eps: torch.Tensor, sigma: float) -> torch.Tensor:
     sigma = max(0.0, min(1.0, float(sigma)))
     return (1.0 - sigma) * ref_clean + sigma * eps
-
-def _rf_match_mean_std(x: torch.Tensor, target: torch.Tensor, strength: float = 1.0) -> torch.Tensor:
-    """Blend x toward target's per-sample mean/std. Prevents RF feature drift."""
-    strength = max(0.0, min(1.0, float(strength)))
-    if strength <= 0.0:
-        return x
-    dims = tuple(range(1, x.ndim))
-    x_mean = x.mean(dim=dims, keepdim=True)
-    x_std = x.std(dim=dims, keepdim=True).clamp_min(1e-6)
-    t_mean = target.mean(dim=dims, keepdim=True)
-    t_std = target.std(dim=dims, keepdim=True).clamp_min(1e-6)
-    matched = (x - x_mean) / x_std * t_std + t_mean
-    return (1.0 - strength) * x + strength * matched
-
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PMI — Proximal-Mean Inversion (Wang et al., ICLR 2026)
@@ -793,9 +737,7 @@ def _rf_build_cache_from_sampler_sigmas(
     stats:          Optional[vp._RuntimeStats] = None,
     eps:            Optional[torch.Tensor] = None,
     rf_mode:        str   = 'rf_gamma',
-    norm_strength:  float = 0.0,
     pmi_alpha:      float = 0.4,
-    gamma_curve:     float = 0.0,
     otip_strength:   float = 0.0,
     otip_phase:      float = 1.0,
     otip_clip_norm:  float = 10.0,
@@ -805,8 +747,7 @@ def _rf_build_cache_from_sampler_sigmas(
     """
     Build reference x_sigma latents on the actual sampler sigma grid.
     """
-    norm_strength = _coerce_norm_strength(norm_strength)
-    mode, gamma_curve = _normalize_rf_mode_and_gamma_curve(rf_mode, gamma_curve)
+    mode = str(rf_mode or 'rf_gamma')
     valid_modes = {'linear', 'rf_gamma', 'rf_gamma_rk2', 'fireflow', 'rf_solver_2'}
     if mode not in valid_modes:
         raise ValueError(
@@ -885,9 +826,6 @@ def _rf_build_cache_from_sampler_sigmas(
     vp._rf_vprint(stats,
         f'{vp._rf_prefix(stats)}   RF trajectory mode: {mode}'
         f'{f"  base={base_mode}" if use_otip else ""}  gamma={gamma:.4f}  '
-        f'gamma_curve={gamma_curve:.3f}  '
-        f'norm_strength={norm_strength:.3f}  '
-        f'norm={"on" if norm_strength > 0.0 else "off"}  '
         f'parameterization={parameterization}\n'
         f'{vp._rf_prefix(stats)}   pmi_alpha={pmi_alpha_eff:.3f}  '
         f'PMI={"on" if use_pmi else "off"}  '
@@ -911,7 +849,7 @@ def _rf_build_cache_from_sampler_sigmas(
         sigma_cur  = float(s)
         delta      = float(sigma_cur - sigma_prev)
         z_prev     = z.detach().clone()
-        gamma_eff  = _rf_gamma_for_mode(mode, gamma, sigma_prev, sigma_cur, gamma_curve)
+        gamma_eff  = _rf_gamma_for_mode(mode, gamma, sigma_prev, sigma_cur)
         otip_extra = ''
         otip_schedule_index = max(0, rf_total_steps - step_i)
 
@@ -1101,11 +1039,6 @@ def _rf_build_cache_from_sampler_sigmas(
                 if use_pmi:
                     extra = (extra + '  ' if extra else '') + f'PMI step={pmi_state.step_count}'
 
-
-        if norm_strength > 0.0:
-            target = _rf_linear_target(ref_clean, eps, sigma_cur)
-            z = _rf_match_mean_std(z, target, strength=norm_strength)
-            extra = (extra + '  ' if extra else '') + f'norm={norm_strength:.2f}'
 
         prev  = sigma_cur
         z_mean = float(z.mean().item())
@@ -1387,20 +1320,6 @@ class RFInversion:
                     'step': 0.01,
                     'tooltip': 'Blends weight between model velocity and prior velocity (0 = pure prior / straight path, 1 = pure model).'
                 }),
-                'gamma_curve': ('FLOAT', {
-                    'default': 2.0,
-                    'min': 0.0,
-                    'max': 8.0,
-                    'step': 0.01,
-                    'tooltip': 'Applies a bell-shaped schedule to gamma across the sigma range, concentrating model influence toward mid-noise levels, 0 disables the curve.'
-                }),
-                'norm_strength': ('FLOAT', {
-                    'default': 1.0,
-                    'min': 0.0,
-                    'max': 1.0,
-                    'step': 0.01,
-                    'tooltip': "After each RF step, blends the latent's mean/std toward the linear target to prevent feature drift, 0 = off, 1 = full correction."
-                }),
                 'pmi_alpha': ('FLOAT', {
                     'default': 0.0,
                     'min': 0.0,
@@ -1435,16 +1354,13 @@ class RFInversion:
         reference_latent,
         rf_mode='rf_gamma_rk2',
         gamma=0.5,
-        gamma_curve=2.0,
-        norm_strength=1.0,
         pmi_alpha=0.0,
         otip_strength=0.0,
         otip_clip_norm=10.0,
         verbose=False,
         ref_conditioning=None,
     ):
-        rf_mode, gamma_curve = _normalize_rf_mode_and_gamma_curve(rf_mode, gamma_curve)
-        norm_strength = _coerce_norm_strength(norm_strength)
+        rf_mode = str(rf_mode or 'rf_gamma')
         otip_strength = _coerce_otip_strength(otip_strength)
         # OTIP phase is intentionally hardcoded to 1.0.
         otip_phase = 1.0
@@ -1473,8 +1389,6 @@ class RFInversion:
         cfg: Dict[str, Any] = {
             'rf_mode': str(rf_mode),
             'gamma': float(gamma),
-            'gamma_curve': float(gamma_curve),
-            'norm_strength': float(norm_strength),
             'pmi_alpha': float(pmi_alpha),
             'otip_strength': float(otip_strength),
             'otip_phase': float(otip_phase),
@@ -1714,9 +1628,5 @@ class RFInversion:
 
         model_clone.set_model_unet_function_wrapper(rf_model_function_wrapper)
 
-        vp._rf_print_prepared(
-            verbose_flag, rf_mode, gamma, gamma_curve,
-            norm_strength, pmi_alpha, model_info,
-        )
 
         return (model_clone, rf_latent)
