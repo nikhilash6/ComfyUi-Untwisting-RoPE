@@ -726,11 +726,16 @@ class _PMIState:
         post_update_corrected: bool = False,
     ) -> torch.Tensor:
         """
-        Apply the PMI proximal-gradient velocity correction.
+        Paper Algorithm 1 uses xdist as a running sum of the *raw predicted*
+        velocities up to the current step:
 
-        strength is a radius multiplier: 0 disables the correction, 1 matches the
-        official radius. Values between 0 and 1 are useful as a conservative UI
-        control while preserving the official update form.
+            xdist += Δt * v_t
+            v_mean = xdist / (t_next - t0)
+            v_hat = v_t - r_t * grad F(v_t) / ||grad F(v_t)||
+            z_next = z + Δt * v_hat
+
+        The corrected velocity is used for the RF state update and the
+        previous-velocity consistency term.
         """
         strength = max(0.0, min(1.0, float(strength)))
         if strength <= 0.0:
@@ -748,23 +753,18 @@ class _PMIState:
         dtype = v_model.dtype
         v_detached = v_model.detach()
 
-        # Official PMI accumulates the time-weighted velocity, then normalizes it
-        # by the next inverse-time value to get the mean-flow velocity.
-        increment = (dt * v_detached).to(device=device, dtype=dtype)
+        raw_increment = (dt * v_detached).to(device=device, dtype=dtype)
         if self.mean_velocity is None:
-            self.mean_velocity = increment.clone()
+            self.mean_velocity = raw_increment.clone()
         else:
-            self.mean_velocity = self.mean_velocity.to(device=device, dtype=dtype) + increment
+            self.mean_velocity = self.mean_velocity.to(device=device, dtype=dtype) + raw_increment
 
         denom = t_next_f if abs(t_next_f) > self.eps else (self.eps if t_next_f >= 0.0 else -self.eps)
         pred_mean = (self.mean_velocity.to(device=device, dtype=dtype) / denom).detach()
 
-
-        # The official PMI objective has a closed-form gradient:
+        # PMI objective gradient:
         #   grad 0.5||v - v_mean||_2^2 = v - v_mean
         #   grad ||v - v_prev||_1       = sign(v - v_prev)
-        # Computing it analytically keeps the official PMI update usable inside
-        # Comfy's no-grad sampling path without adding any model evaluations.
         pred = v_detached
         grad = (pred.float() - pred_mean.float()).to(dtype=dtype)
         if self.prev_corrected_velocity is not None:
@@ -776,9 +776,6 @@ class _PMIState:
 
         self.prev_corrected_velocity = corrected.detach().clone()
         self.step_count += 1
-
-        if post_update_corrected:
-            self.mean_velocity = self.mean_velocity.to(device=device, dtype=dtype) + dt * corrected.detach()
 
         return corrected
 
