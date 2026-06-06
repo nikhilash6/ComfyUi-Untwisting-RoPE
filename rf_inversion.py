@@ -748,7 +748,7 @@ def _rf_build_cache_from_sampler_sigmas(
     Build reference x_sigma latents on the actual sampler sigma grid.
     """
     mode = str(rf_mode or 'rf_gamma')
-    valid_modes = {'linear', 'rf_gamma', 'rf_gamma_rk2', 'fireflow', 'rf_solver_2'}
+    valid_modes = {'linear', 'rf_gamma', 'rf_gamma_rk2', 'rf_solver_2', 'endpoint_heun', 'fireflow'}
     if mode not in valid_modes:
         raise ValueError(
             f"Invalid rf_mode={mode!r}. Expected one of {sorted(valid_modes)}."
@@ -987,6 +987,47 @@ def _rf_build_cache_from_sampler_sigmas(
                 _preview_once(step_i - 1, raw_preview_mid, z)
                 extra = (
                     f'RF-Solver-2 exact  |v_model_mid|={vm_abs_mid:.5f}  '
+                    f'|prior_target|={vp_abs_target:.5f}'
+                )
+                if otip_extra:
+                    extra += otip_extra
+                if use_pmi:
+                    extra += f'  PMI step={pmi_state.step_count}'
+
+            elif base_mode == 'endpoint_heun':
+                # ── Endpoint Heun / explicit trapezoid step ─────────────
+                # Predictor: advance with the start velocity to the actual next sigma.
+                # Corrector: query the model at that predicted endpoint and average
+                # start/end velocities. At gamma=1 this is a pure model trajectory
+                # with exactly two model evaluations per RF step.
+                z_pred_next = z + delta * v_model
+                v_model_end, ok_end, raw_preview_end = _call_model_as_velocity(
+                    z_pred_next, sigma_cur, ' endpoint_heun end'
+                )
+                vm_abs_end = float(v_model_end.abs().mean().item())
+
+                z_model_next = z + 0.5 * delta * (v_model + v_model_end)
+                z_prior_next = _rf_linear_target(ref_clean, eps, sigma_cur)
+                vp_abs_target = float((z_prior_next - z).abs().mean().item() / max(abs(delta), 1e-12))
+                vp_sum += vp_abs_target
+
+                z_solver_next = gamma_eff * z_model_next + (1.0 - gamma_eff) * z_prior_next
+                if abs(delta) > 1e-12:
+                    v_total = (z_solver_next - z) / delta
+                    if use_otip:
+                        v_total, ot_strength, ot_abs = _otip_apply_velocity_guidance(
+                            v_total, z, eps, sigma_prev, otip_schedule_index, rf_total_steps,
+                            otip_strength_eff, otip_phase_eff, otip_clip_norm_eff,
+                            respect_model_norm=otip_respect_model_norm_eff,
+                        )
+                        otip_extra = f'  OTIP λ={ot_strength:.4f} |ot|={ot_abs:.5f}'
+                    v_total = _apply_pmi_if_enabled(v_total, sigma_cur, post_update_corrected=True)
+                    z = z + delta * v_total
+                else:
+                    z = z_solver_next
+                _preview_once(step_i - 1, raw_preview_end, z)
+                extra = (
+                    f'Endpoint-Heun  |v_model_end|={vm_abs_end:.5f}  '
                     f'|prior_target|={vp_abs_target:.5f}'
                 )
                 if otip_extra:
@@ -1306,7 +1347,7 @@ class RFInversion:
                 'model': ('MODEL',),
                 'reference_latent': ('LATENT',),
                 'ref_conditioning': ('CONDITIONING',),
-                'rf_mode': (['linear', 'rf_gamma', 'rf_gamma_rk2', 'rf_solver_2', 'fireflow'], {
+                'rf_mode': (['linear', 'rf_gamma', 'rf_gamma_rk2', 'rf_solver_2', 'endpoint_heun', 'fireflow'], {
                     'default': 'rf_gamma',
                     'tooltip': (
                         'Selects the ODE solver used to build the noisy reference trajectory. '
