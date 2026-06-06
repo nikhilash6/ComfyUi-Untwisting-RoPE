@@ -1,7 +1,7 @@
 {
   "id": "44259803-f9d6-4eb1-a94a-75b8213649d0",
   "revision": 0,
-  "last_node_id": 638,
+  "last_node_id": 639,
   "last_link_id": 1564,
   "nodes": [
     {
@@ -813,69 +813,6 @@
       ]
     },
     {
-      "id": 603,
-      "type": "RFInversion",
-      "pos": [
-        812.2907721832939,
-        1175.3247940381746
-      ],
-      "size": [
-        274.0209232753132,
-        266
-      ],
-      "flags": {},
-      "order": 20,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 1563
-        },
-        {
-          "name": "reference_latent",
-          "type": "LATENT",
-          "link": 1526
-        },
-        {
-          "name": "ref_conditioning",
-          "type": "CONDITIONING",
-          "link": 1535
-        }
-      ],
-      "outputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "links": [
-            1554
-          ]
-        },
-        {
-          "name": "rf_inversion",
-          "type": "LATENT",
-          "links": [
-            1555
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "untwistingrope",
-        "ver": "c9136fcced444ea84778a25a37a2b45371ea06a5",
-        "Node name for S&R": "RFInversion"
-      },
-      "widgets_values": [
-        "rf_solver_2",
-        0.5,
-        0,
-        0.5,
-        0,
-        true,
-        20,
-        false
-      ]
-    },
-    {
       "id": 611,
       "type": "Note",
       "pos": [
@@ -1072,6 +1009,67 @@
         0.5,
         1,
         0.1
+      ]
+    },
+    {
+      "id": 603,
+      "type": "RFInversion",
+      "pos": [
+        812.2907721832939,
+        1175.3247940381746
+      ],
+      "size": [
+        274.0209232753132,
+        266
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1563
+        },
+        {
+          "name": "reference_latent",
+          "type": "LATENT",
+          "link": 1526
+        },
+        {
+          "name": "ref_conditioning",
+          "type": "CONDITIONING",
+          "link": 1535
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            1554
+          ]
+        },
+        {
+          "name": "rf_inversion",
+          "type": "LATENT",
+          "links": [
+            1555
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "untwistingrope",
+        "ver": "c9136fcced444ea84778a25a37a2b45371ea06a5",
+        "Node name for S&R": "RFInversion"
+      },
+      "widgets_values": [
+        "rf_solver_2",
+        0.5,
+        0,
+        0.35,
+        20,
+        true
       ]
     }
   ],
@@ -1289,10 +1287,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.5559917313492756,
+      "scale": 0.740024994425886,
       "offset": [
-        -147.18389240980628,
-        -530.8929411531507
+        -370.6614793098297,
+        -743.7992634892397
       ]
     },
     "frontendVersion": "1.45.15",
